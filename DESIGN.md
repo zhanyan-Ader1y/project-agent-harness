@@ -459,7 +459,9 @@ metadata:
 | 脚本 | 作用 |
 | --- | --- |
 | `scripts/experience-write` | 查库 → 交 skill 判定 → 红线过滤 → `infer=False` 写入；候选合并 |
-| `scripts/assert-replay.js` | ✅ **已落地**。重跑 `evidence_cmd` 并比对 + 校验符号存在性；用于写入自检、注入前校验、库审计、淘汰判定 |
+| `scripts/assert-replay.js` | ⚠️ **已落地但不得接入共享库**。重跑 `evidence_cmd` 并比对 + 校验符号存在性；四个消费方（写入自检、注入前校验、库审计、淘汰判定）尚无一落地 |
+
+**⚠️ 2026-09-02 落地评审的结论：当前实现是一条可远程触发的任意代码执行通道**，三项攻击被实测执行成功且均返回 `pass`。修完前只能用于**自己手写的条目**，不得喂入共享库内容。详见 `docs/review/`。
 
 脚本用 Node 实现并以 `node <path>` 调用（不依赖 shebang，避免 Windows 上的可执行位与解释器解析问题）。**这引入一项对 Node 的依赖**——不用 `jq` 已是硬约束，而在无 JSON 工具的纯 shell 里处理条目不现实。
 
