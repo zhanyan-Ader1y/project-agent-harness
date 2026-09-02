@@ -1,0 +1,8 @@
+{
+  "name": "experience",
+  "description": "团队经验沉淀：捕获编码错误、经三层治理入库、按提示检索并注入",
+  "version": "0.1.0",
+  "author": {
+    "name": "zhanyan"
+  }
+}

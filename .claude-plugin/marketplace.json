@@ -1,0 +1,13 @@
+{
+  "name": "project-agent-harness",
+  "owner": {
+    "name": "zhanyan"
+  },
+  "plugins": [
+    {
+      "name": "experience",
+      "source": "./plugins/experience",
+      "description": "团队经验沉淀：捕获编码错误、经三层治理入库、按提示检索并注入"
+    }
+  ]
+}

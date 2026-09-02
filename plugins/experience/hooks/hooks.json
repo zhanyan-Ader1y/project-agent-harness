@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__plugin_experience_mem0__(add_memory|update_memory|delete).*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"经验库不接受直接调用 mem0 写入或删除工具。写入须经 scripts/experience-write（查库 → Review/Dedup/Merge 三层判定 → 红线过滤 → infer=False 写入）；删除一律禁止，撤回请改写 status: retracted。\"}}'",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
