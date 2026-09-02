@@ -1,7 +1,3 @@
-> **⚠️ `scripts/assert-replay.js` 当前不得喂入共享库内容。**
-> 2026-09-02 的落地评审实测出三条可执行的攻击（假冒白名单程序、`git --upload-pack=` 拉起外部脚本、`find -fprintf` 写任意文件），三条均返回 `pass`。
-> 仅可用于自己手写的条目。
-
 # experience
 
 团队经验沉淀。捕获编码错误 → 三层治理 → 入云端 mem0 → 按提示检索注入。
@@ -46,7 +42,11 @@ node plugins/experience/scripts/assert-replay.js <entry.json|-> [--cwd dir] [--t
 
 退出码 0 = 全部通过，1 = 有条目未通过，2 = 用法或输入错误。
 
-**它会执行 `evidence_cmd`，而条目来自团队共享的云端库**——因此三道防线：拒绝含 shell 元字符的命令、不经 shell 执行、程序名白名单（内联执行代码的参数一律拒绝）。被拒绝按**失败**处理，不按"没检查"处理。
+**它会执行 `evidence_cmd`，而条目来自团队共享的云端库。** 2026-09-02 的落地评审实测出三条可执行的攻击（假冒白名单程序、`git --upload-pack=` 拉起外部脚本、`find -fprintf` 写任意文件），三条当时均返回 `pass`。**已修，每条都有回归用例。**
+
+现在的边界是四道：拒绝 shell 元字符 → 不经 shell 执行 → 程序名必须是裸名 → **子命令与每一个选项都必须被显式允许，路径参数关进 `--cwd` 之内**。要放宽只能改 `COMMAND_RULES`，是一次有意的动作。
+
+**已知残留**：超时只杀直接子进程，孙进程会活下来。收紧允许列表后能起进程树的只剩本仓库自己的测试命令，因此是资源问题不是安全问题。
 
 **依赖 Node。** 脚本以 `node <path>` 调用，不依赖 shebang。
 
@@ -62,8 +62,10 @@ hook matcher 有两个**静默失效**点，都不报错：
 守门的是 [`evals/hook-matcher.test.js`](../../evals/hook-matcher.test.js)，它复刻了官方的 matcher 分派规则并对上述两种错写法做反向对照：
 
 ```bash
-node evals/hook-matcher.test.js
+node evals/run-all.js
 ```
+
+同一份用例还会**实跑 deny 命令**并断言输出是可解析的 deny 决策，并以旧写法（`echo '单引号 JSON'`）作反向对照——旧写法在 `cmd.exe` 下解析失败、闸门静默放行，这正是它被换掉的原因。
 
 ## 开发
 

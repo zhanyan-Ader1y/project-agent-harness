@@ -42,13 +42,18 @@
 ```bash
 claude --plugin-dir ./plugins/experience    # 免安装加载
 claude plugin validate ./plugins/experience
-node evals/hook-matcher.test.js             # 评测用例
+node evals/run-all.js                        # 全部评测用例
 ```
 
 ## 当前进度
 
-设计完成，实现刚起步。**已生效的只有一条**：拦下对 mem0 写入与删除工具的直接调用——写入必须走脚本，而脚本尚未落地，所以现在什么都不该被写进经验库。
+设计完成，实现刚起步。已落地两件：
 
-`skills/`、`scripts/` 刻意未建空壳，理由见[插件 README](plugins/experience/README.md)。
+- **闸门**：拦下对 mem0 写入与删除工具的直接调用。写入必须走脚本，而写入脚本尚未落地，所以现在什么都不该被写进经验库。
+- **`assert-replay`**：重跑经验里的 `evidence_cmd` 并校验符号存在性。不依赖 mem0，可独立使用。
+
+`skills/`、`scripts/experience-write` 刻意未建空壳，理由见[插件 README](plugins/experience/README.md)。
+
+**凭据到位后的第一件事**是对 mem0 端点跑一次 `tools/list`——当前 hook matcher 里的工具名取自官方文档，**从未对活端点确认过**（2026-09-02 未认证请求返回 401）。若真实名称不同，闸门整条失效。
 
 **两项在实现前必须查清**，均记于 `DESIGN.md`「阻塞目标本身的未知」：mem0 的 `user_id` 如何确定（决定跨成员共享是否成立）、云端凭据如何分发给团队。

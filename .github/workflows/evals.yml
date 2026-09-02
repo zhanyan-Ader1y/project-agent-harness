@@ -1,0 +1,35 @@
+# DESIGN.md 的 eval 门禁：skills/ hooks/ scripts/ 任一变更即跑，
+# 冒烟集必须 100% 通过才可合入。
+#
+# 注意：本仓库尚无远端，**此工作流从未实际运行过**。
+name: evals
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - 'plugins/**/skills/**'
+      - 'plugins/**/hooks/**'
+      - 'plugins/**/scripts/**'
+      - 'evals/**'
+      - '.github/workflows/evals.yml'
+
+jobs:
+  evals:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 符号检查的 fixture 依赖工作树完整；浅克隆够用，但 git 相关的
+          # evidence_cmd 用例需要一个真实的 .git 目录。
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: 安装 ripgrep
+        # 符号检查在 rg 与 grep 之间回退。两者都装上，才能保证 CI 走的是
+        # 与开发机相同的那条路径。
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+      - name: 跑全部 eval
+        run: node evals/run-all.js

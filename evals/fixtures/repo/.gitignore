@@ -1,0 +1,8 @@
+# fixture 自带的 .gitignore，用来验证符号检查已统一 rg 与 grep 的语义。
+#
+# rg 默认尊重 .gitignore，grep -r 不尊重。若不统一，装了 rg 的人会把
+# dist/ 里的符号判成"查无踪迹"（误杀好经验），没装的人则会因为某条
+# commit message 提过这个词就判"存在"（放过编造的符号）。
+#
+# dist/ 下的文件由 `git add -f` 强制入库——被本文件忽略是它的作用所在。
+dist/
