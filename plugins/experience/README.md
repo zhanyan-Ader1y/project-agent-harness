@@ -10,17 +10,41 @@
 | --- | --- |
 | `.mcp.json` | ✅ 云端 mem0（`https://mcp.mem0.ai/mcp`，HTTP，OAuth） |
 | `hooks/hooks.json` | ✅ 一条：deny 裸调用 mem0 的写入与删除工具 |
+| `scripts/assert-replay.js` | ✅ 重跑断言 + 符号存在性校验 |
 | `skills/experience-intake/` | ⬜ 未建 |
 | `scripts/experience-write` | ⬜ 未建 |
-| `scripts/assert-replay` | ⬜ 未建 |
 
 **未建的部分刻意不留空壳。** 一个带 description 却没有正文的 skill 会被模型加载并给出空指引；一个静默退出的脚本会让"写入失败必须硬失败"这条约束落空。空目录比空契约安全。
 
-## 当前唯一生效的行为
+## 已生效的行为
 
-`PreToolUse` 拦下 `add_memory` / `update_memory` / `delete*`，一律拒绝并给出理由。
+**闸门**：`PreToolUse` 拦下 `add_memory` / `update_memory` / `delete*`，一律拒绝并给出理由。**这在写入脚本落地之前就是正确行为**——写入必须走脚本，脚本还不存在，所以现在什么都不该写进去。检索类工具（`search_memories` / `get_memories` / …）不受影响。
 
-**这在写入脚本落地之前就是正确行为**——写入必须走脚本，脚本还不存在，所以现在什么都不该写进去。检索类工具（`search_memories` / `get_memories` / …）不受影响。
+**`assert-replay.js`**：可独立使用，不依赖 mem0。
+
+```bash
+node plugins/experience/scripts/assert-replay.js <entry.json|-> [--cwd dir] [--timeout ms] [--allow a,b] [--quiet]
+```
+
+条目形如：
+
+```json
+{
+  "id": "…",
+  "metadata": {
+    "evidence_cmd": "git rev-parse --is-inside-work-tree",
+    "evidence_digest": { "exit": 0, "contains": ["true"] },
+    "files": ["DESIGN.md"],
+    "symbols": ["ZzWidget.attachToList"]
+  }
+}
+```
+
+退出码 0 = 全部通过，1 = 有条目未通过，2 = 用法或输入错误。
+
+**它会执行 `evidence_cmd`，而条目来自团队共享的云端库**——因此三道防线：拒绝含 shell 元字符的命令、不经 shell 执行、程序名白名单（内联执行代码的参数一律拒绝）。被拒绝按**失败**处理，不按"没检查"处理。
+
+**依赖 Node。** 脚本以 `node <path>` 调用，不依赖 shebang。
 
 ## 改动 matcher 前必读
 
