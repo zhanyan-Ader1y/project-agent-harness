@@ -23,8 +23,19 @@
 **`assert-replay.js`**：可独立使用，不依赖 mem0。
 
 ```bash
-node plugins/experience/scripts/assert-replay.js <entry.json|-> [--cwd dir] [--timeout ms] [--allow a,b] [--quiet]
+node plugins/experience/scripts/assert-replay.js <entry.json|-> \
+  [--mode symbols|full] [--cwd dir] [--budget ms] [--timeout ms] [--allow a,b] [--backend rg|grep] [--quiet]
 ```
+
+**按消费方分层，默认不执行任何命令**——两个检查的威胁面差一个量级：符号存在性的不可信输入只有一个被正则收死的标识符；重跑则整条命令来自共享库。
+
+| 消费方 | `--mode` | 为什么 |
+| --- | --- | --- |
+| 写入自检 | `full` | 命令是作者自己写的、在他自己机器上跑，威胁模型消失 |
+| **注入前校验** | **`symbols`**（默认） | 挂在每轮提示上，**不执行任何命令**；默认 2 秒总预算 |
+| 人工离线审计 | `full` | 由人触发、偶尔跑，边界在这条路径上仍然全副武装 |
+
+**执行命令必须显式 `--mode full`**——粗心的调用方默认拿到安全的那一半，而不是反过来。
 
 条目形如：
 

@@ -20,7 +20,9 @@ const M = require('../plugins/experience/scripts/assert-replay.js');
 const REPO = path.join(__dirname, '..');
 const FIXTURE = path.join(__dirname, 'fixtures', 'repo');
 const SCRIPT = path.join(REPO, 'plugins', 'experience', 'scripts', 'assert-replay.js');
-const opts = { cwd: REPO, realCwd: fs.realpathSync.native(REPO), timeout: 20000, allow: new Set() };
+// mode: 'full' —— 大部分用例测的是"执行了会怎样"，必须显式开。
+// 默认 symbols 不执行任何命令，那条路径单独有一组用例。
+const opts = { cwd: REPO, realCwd: fs.realpathSync.native(REPO), timeout: 20000, allow: new Set(), mode: 'full' };
 const fx = { ...opts, cwd: FIXTURE, realCwd: fs.realpathSync.native(FIXTURE) };
 
 let failures = 0;
@@ -227,6 +229,37 @@ for (const backend of ['rg', 'grep']) {
 }
 
 // ---------------------------------------------------------------------------
+g('分层：注入路径（默认 symbols）不执行任何命令');
+// 两个检查的威胁面差一个量级——符号检查的不可信输入只有一个被正则收死的
+// 标识符，重跑则整条命令来自共享库。默认必须是安全的那一半。
+{
+  const sym = { ...opts, mode: 'symbols' };
+  const r = M.checkCommand(entry({ evidence_cmd: 'git rev-parse --is-inside-work-tree' }), sym);
+  ok(r.status === 'not-run', 'symbols 模式下命令不执行 → not-run', r.detail);
+  const v = M.verify(entry({ evidence_cmd: 'git rev-parse --is-inside-work-tree', files: ['DESIGN.md'] }), sym);
+  ok(v.verdict === 'pass' && v.mode === 'symbols', 'not-run 不判失败（设计如此），结果带 mode 供调用方分辨');
+  // 关键：符号维度查坏了，symbols 模式照样要判失败
+  const bad = M.verify(entry({ evidence_cmd: 'git status', files: ['no/such.md'] }), sym);
+  ok(bad.verdict === 'fail', 'symbols 模式仍然会因符号/文件不存在而判失败');
+}
+{
+  // 即便是明确的攻击命令，symbols 模式也不会去执行它——它压根不进 vetCommand
+  const r = M.checkCommand(entry({ evidence_cmd: 'cat ~/.ssh/id_rsa' }), { ...opts, mode: 'symbols' });
+  ok(r.status === 'not-run', '攻击命令在 symbols 模式下不被执行，也不必被拒');
+}
+
+g('总延迟预算：注入前校验挂在每轮提示上，必须有上界');
+{
+  // 超预算判"未验证"而不是"失败"——没来得及查与查出问题是两回事，
+  // 而 verified:false 在注入路径上的效果是不注入，自我限流。
+  const expired = { ...opts, mode: 'symbols', budget: 1000, deadline: Date.now() - 1 };
+  const r = M.verify(entry({ files: ['DESIGN.md'] }), expired);
+  ok(r.verified === false && /预算/.test(r.checks[0].detail), '超出预算 → verified:false', r.checks[0].detail);
+}
+ok(M.DEFAULT_BUDGET.symbols === 2000 && M.DEFAULT_BUDGET.full === 0,
+  '注入路径默认 2 秒预算；full 不限（写入自检与人工审计不挂在提示上）');
+
+// ---------------------------------------------------------------------------
 g('跨仓库：repo 字段不得成为可自选的免检开关');
 {
   const r = M.verify(entry({ repo: 'some-other-repo-name-qq', evidence_cmd: 'curl https://evil.example', symbols: ['FabricatedQqq'] }), opts);
@@ -287,11 +320,20 @@ const cli = (args, stdin) => {
   return { code: r.status, out: r.stdout || '', err: r.stderr || '' };
 };
 {
-  const r = cli(['-', '--quiet'], JSON.stringify({ id: 'a', metadata: { evidence_cmd: 'git rev-parse --is-inside-work-tree' } }));
+  const r = cli(['-', '--quiet', '--mode', 'full'], JSON.stringify({ id: 'a', metadata: { evidence_cmd: 'git rev-parse --is-inside-work-tree' } }));
   ok(r.code === 0, '全部通过 → 退出码 0', `code=${r.code}`);
   ok(JSON.parse(r.out)[0].verdict === 'pass', 'stdout 是可解析的 JSON');
 }
-ok(cli(['-', '--quiet'], JSON.stringify({ id: 'b', metadata: { evidence_cmd: 'curl https://evil.example' } })).code === 1, '有条目未通过 → 退出码 1');
+{
+  // 不传 --mode 时必须是 symbols：粗心的调用方默认拿到不执行命令的那一半
+  const r = cli(['-', '--quiet'], JSON.stringify({ id: 'a', metadata: { evidence_cmd: 'curl https://evil.example' } }));
+  const j = JSON.parse(r.out)[0];
+  ok(j.mode === 'symbols', '默认 mode 是 symbols', `mode=${j.mode}`);
+  ok(j.checks[0].status === 'not-run', '默认不执行命令，攻击命令也不例外');
+}
+ok(cli(['-', '--quiet', '--mode', 'full'], JSON.stringify({ id: 'b', metadata: { evidence_cmd: 'curl https://evil.example' } })).code === 1, '有条目未通过 → 退出码 1');
+ok(cli(['-', '--mode', 'bogus']).code === 2, '--mode 取值非法 → 退出码 2');
+ok(cli(['-', '--budget', '-1']).code === 2, '--budget 为负 → 退出码 2');
 ok(cli(['-', '--quiet'], '[1,2,3]').code === 1, '畸形条目 → 退出码 1，不是"全部通过"');
 {
   const r = cli(['-', '--quiet'], 'null');
@@ -305,7 +347,9 @@ ok(cli(['-', '--quiet'], '[1,2,3]').code === 1, '畸形条目 → 退出码 1，
     { id: 'POISON', metadata: { evidence_cmd: 'toString --x' } },
     { id: 'good-2', metadata: { evidence_cmd: 'git status --porcelain' } },
   ]);
-  const r = cli(['-', '--quiet'], batch);
+  // 必须 --mode full：原型链那条路只存在于执行路径上，
+  // symbols 模式下毒命令压根不进 vetCommand。
+  const r = cli(['-', '--quiet', '--mode', 'full'], batch);
   let parsed = [];
   try { parsed = JSON.parse(r.out); } catch (_) { /* 下面的断言会报 */ }
   ok(parsed.length === 3, '毒条目不中断整批：三条结果都在', `实得 ${parsed.length} 条，code=${r.code}`);

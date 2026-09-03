@@ -11,11 +11,31 @@
 //   node assert-replay.js <entry.json>      单条
 //   node assert-replay.js -                 从 stdin 读 JSON 或 JSONL
 //   选项：
+//     --mode <m>        symbols（默认）| full。见下「两个安全面完全不对称的检查」
 //     --cwd <dir>       在哪个仓库里跑与查（默认当前目录，必须存在）
-//     --timeout <ms>    单条命令超时（默认 30000）
+//     --timeout <ms>    单条命令/检索超时（默认 30000）
+//     --budget <ms>     整轮总延迟上限，超出即停止并把剩余条目判为未验证
+//                       （symbols 模式默认 2000；full 模式默认不限）
 //     --allow <a,b,c>   追加允许执行的程序；追加的程序**不允许携带任何选项**
 //     --backend <name>  强制符号检索后端（rg | grep），默认按可用性回退
 //     --quiet           只输出 JSON，不输出人类可读摘要
+//
+// ## 两个安全面完全不对称的检查
+//
+// 本脚本做的两件事，威胁面差了一个量级：
+//
+//   符号存在性  唯一的不可信输入是标识符字符串，被 ^[A-Za-z_$][\w$]*$ 收死，
+//               命令行由脚本自己拼。**近乎零攻击面。**
+//   重跑断言    整条命令来自共享云库。**全部防御成本在这里。**
+//
+// 因此按消费方分层，而不是一律全跑：
+//
+//   写入自检      full     命令是作者自己写的、在他自己机器上跑，威胁模型消失
+//   注入前校验    symbols  挂在每轮提示上——这条路径**不执行任何命令**
+//   人工离线审计  full     由人触发、偶尔跑，边界在这条路径上仍然全副武装
+//
+// **默认是 symbols。执行命令必须显式 --mode full**——让粗心的调用方
+// 默认拿到安全的那一半，而不是反过来。
 //
 // 退出码：0 = 无失败；1 = 有条目未通过；2 = 用法或输入错误。
 //
@@ -307,6 +327,12 @@ function checkCommand(entry, opts) {
   if (cmd === undefined || cmd === null || String(cmd).trim() === '') {
     return { kind: 'command', status: 'missing', detail: '条目没有 evidence_cmd' };
   }
+  if (opts.mode !== 'full') {
+    // 注入路径不执行任何命令。这是设计如此，不是缺口，所以 not-run
+    // 既不判失败也不影响 verified——但结果里带 mode，调用方据此知道
+    // 这一维**没有查过**，不得把 verified:true 读成"命令也验过了"。
+    return { kind: 'command', status: 'not-run', detail: `mode=${opts.mode}：本路径不执行命令，需 --mode full`, cmd };
+  }
 
   const vet = vetCommand(cmd, opts);
   if (!vet.ok) return { kind: 'command', status: 'refused', detail: vet.reason, cmd };
@@ -502,9 +528,21 @@ function belongsToRepo(entry, opts) {
 
 function verify(entry, opts) {
   const fail = (detail, id = null) => ({
-    id, verdict: 'fail', ok: false, verified: false,
+    id, mode: opts.mode, verdict: 'fail', ok: false, verified: false,
     checks: [{ kind: 'entry', status: 'error', detail }],
   });
+
+  // 总延迟预算：注入前校验挂在每轮用户提示上，必须有上界。超出预算的
+  // 条目判为**未验证**而不是失败——"没来得及查"与"查出问题"是两回事，
+  // 而 verified:false 在注入路径上的效果就是不注入，自我限流。
+  if (opts.deadline && Date.now() > opts.deadline) {
+    const id = (entry && typeof entry === 'object' && !Array.isArray(entry))
+      ? (entry.id || (entry.metadata && entry.metadata.id) || null) : null;
+    return {
+      id, mode: opts.mode, verdict: 'fail', ok: false, verified: false,
+      checks: [{ kind: 'entry', status: 'error', detail: `超出总延迟预算（${opts.budget}ms），本条未校验` }],
+    };
+  }
 
   if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
     return fail(`条目不是对象：${JSON.stringify(entry)}`);
@@ -520,6 +558,7 @@ function verify(entry, opts) {
     if (!b.belongs) {
       return {
         id,
+        mode: opts.mode,
         verdict: 'skipped',
         ok: true,
         verified: false,   // 关键：没验过就是没验过，消费方不得当作通过
@@ -535,6 +574,7 @@ function verify(entry, opts) {
     const unverifiable = checks.some((c) => c.status === 'error');
     return {
       id,
+      mode: opts.mode,
       verdict: bad || unverifiable ? 'fail' : 'pass',
       ok: !(bad || unverifiable),
       verified: !unverifiable,
@@ -564,8 +604,14 @@ function parseEntries(text) {
   }
 }
 
+const MODES = ['symbols', 'full'];
+const DEFAULT_BUDGET = { symbols: 2000, full: 0 }; // 0 = 不限
+
 function main(argv) {
-  const opts = { cwd: process.cwd(), timeout: 30000, allow: new Set(), quiet: false, backend: null };
+  const opts = {
+    cwd: process.cwd(), timeout: 30000, allow: new Set(), quiet: false,
+    backend: null, mode: 'symbols', budget: null,
+  };
   const rest = [];
   const needValue = (flag, v) => {
     if (v === undefined || String(v).startsWith('-')) throw new Error(`${flag} 缺少取值`);
@@ -575,6 +621,8 @@ function main(argv) {
     for (let i = 0; i < argv.length; i++) {
       const a = argv[i];
       if (a === '--cwd') opts.cwd = needValue('--cwd', argv[++i]);
+      else if (a === '--mode') opts.mode = needValue('--mode', argv[++i]);
+      else if (a === '--budget') opts.budget = Number(needValue('--budget', argv[++i]));
       else if (a === '--timeout') opts.timeout = Number(needValue('--timeout', argv[++i]));
       else if (a === '--backend') opts.backend = needValue('--backend', argv[++i]);
       else if (a === '--allow') String(needValue('--allow', argv[++i])).split(',').forEach((s) => s.trim() && opts.allow.add(s.trim()));
@@ -583,14 +631,18 @@ function main(argv) {
       else rest.push(a);
     }
     if (rest.length !== 1) throw new Error('需要且只需要一个输入（文件路径或 -）');
+    if (!MODES.includes(opts.mode)) throw new Error(`--mode 只能是 ${MODES.join(' 或 ')}`);
+    if (opts.budget === null) opts.budget = DEFAULT_BUDGET[opts.mode];
+    if (!Number.isFinite(opts.budget) || opts.budget < 0) throw new Error('--budget 必须是非负数（毫秒，0 表示不限）');
     if (!Number.isFinite(opts.timeout) || opts.timeout <= 0) throw new Error('--timeout 必须是正数（毫秒）');
     if (opts.backend && !BACKENDS[opts.backend]) throw new Error(`--backend 只能是 ${Object.keys(BACKENDS).join(' 或 ')}`);
     if (!fs.existsSync(opts.cwd) || !fs.statSync(opts.cwd).isDirectory()) throw new Error(`--cwd 不是存在的目录：${opts.cwd}`);
     opts.realCwd = fs.realpathSync.native(opts.cwd);
   } catch (e) {
-    process.stderr.write(`${e.message}\n用法：node assert-replay.js <entry.json|-> [--cwd dir] [--timeout ms] [--allow a,b] [--backend rg|grep] [--quiet]\n`);
+    process.stderr.write(`${e.message}\n用法：node assert-replay.js <entry.json|-> [--mode symbols|full] [--cwd dir] [--budget ms] [--timeout ms] [--allow a,b] [--backend rg|grep] [--quiet]\n`);
     return 2;
   }
+  if (opts.budget > 0) opts.deadline = Date.now() + opts.budget;
 
   let entries;
   try {
@@ -606,7 +658,7 @@ function main(argv) {
 
   if (!opts.quiet) {
     for (const r of results) {
-      process.stderr.write(`${r.verdict.toUpperCase().padEnd(7)} ${r.verified ? '' : '[未验证] '}${r.id || '(无 id)'}\n`);
+      process.stderr.write(`${r.verdict.toUpperCase().padEnd(7)} [${r.mode}] ${r.verified ? '' : '[未验证] '}${r.id || '(无 id)'}\n`);
       for (const c of r.checks) {
         process.stderr.write(`    ${c.status.padEnd(9)} ${c.kind.padEnd(8)} ${c.detail}\n`);
       }
@@ -623,5 +675,5 @@ if (require.main === module) {
 module.exports = {
   tokenize, normalizeFlags, escapesRepo, escapesRepoPhysically, vetCommand,
   checkCommand, checkSymbols, repoHasIdentifier, belongsToRepo, verify,
-  parseEntries, main, COMMAND_RULES, BACKENDS, LIMITS,
+  parseEntries, main, COMMAND_RULES, BACKENDS, LIMITS, MODES, DEFAULT_BUDGET,
 };
