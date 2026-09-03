@@ -11,10 +11,26 @@
 | `.mcp.json` | ✅ 云端 mem0（`https://mcp.mem0.ai/mcp`，HTTP，OAuth） |
 | `hooks/hooks.json` | ✅ 一条：deny 裸调用 mem0 的写入与删除工具 |
 | `scripts/assert-replay.js` | ✅ 重跑断言 + 符号存在性校验 |
+| `scripts/selfcheck.js` | ✅ **装好之后先跑它**，见下 |
 | `skills/experience-intake/` | ⬜ 未建 |
 | `scripts/experience-write` | ⬜ 未建 |
 
 **未建的部分刻意不留空壳。** 一个带 description 却没有正文的 skill 会被模型加载并给出空指引；一个静默退出的脚本会让"写入失败必须硬失败"这条约束落空。空目录比空契约安全。
+
+## 装好之后先跑自检
+
+```bash
+node plugins/experience/scripts/selfcheck.js --cwd <你的仓库>
+node plugins/experience/scripts/selfcheck.js --cwd <你的仓库> --mem0   # 需 MEM0_API_KEY
+```
+
+**为什么必须跑**：本插件的强制点全部是**静默失效型**的——
+
+- `node` 不在 PATH 时，deny 闸门**放行且不留痕**（`cmd.exe` 下退出码是 0）
+- 只有 `grep` 没有 `rg` 的机器上，符号检索慢数倍，可能直接超出注入预算
+- MCP 连不上时，检索静默返回空——看起来像"没有相关经验"
+
+**正常使用中你看不见这些**：你会以为闸门在、经验在，实际都不在。自检逐项实跑（包括把解释器换成不存在的程序、确认闸门仍以 exit 2 阻断）并打印耗时，**输出可以直接贴出来**。
 
 ## 已生效的行为
 

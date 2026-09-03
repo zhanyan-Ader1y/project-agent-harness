@@ -30,12 +30,14 @@ function matches(matcher, tool) {
 const hooksPath = path.join(__dirname, '..', 'plugins', 'experience', 'hooks', 'hooks.json');
 const matcher = JSON.parse(fs.readFileSync(hooksPath, 'utf8')).hooks.PreToolUse[0].matcher;
 
-// ⚠️ 下面两份工具名取自 mem0 官方 hosted MCP 文档，**从未对活端点做过
-// tools/list 确认**（2026-09-02 实测：未认证请求返回 401）。若真实名称是
-// add_memories（复数，OpenMemory 用的就是这个），当前 matcher 匹配不上、
-// 闸门整条失效，而本用例因为抄了同一个前提照样 PASS——它守不住这一类偏差。
-// 凭据到位后第一件事：跑一次 tools/list，把结果落成 fixture，再让本用例
-// 对着 fixture 断言。
+// 工具名已于 2026-09-03 对活端点确认：`https://mcp.mem0.ai/mcp`（server
+// 版本 1.29.1）的 tools/list 实得 11 个工具，写入与删除类正是下面这五个。
+//
+// **但本用例仍守不住"工具名变了"这一类偏差**——它把名字抄在这里，与
+// hooks.json 引用同一个前提。真正的守法是把 tools/list 的结果落成 fixture
+// 再对着 fixture 断言；那件事**还没做**。
+// 在此之前，`plugins/experience/scripts/selfcheck.js --mem0` 是唯一会
+// 对活端点核对工具名的东西，而它由人手动跑。
 const mustHit = [
   'mcp__plugin_experience_mem0__add_memory',
   'mcp__plugin_experience_mem0__update_memory',
@@ -120,6 +122,18 @@ for (const shell of shells) {
   check(d === 'deny', `${shell}：输出为 permissionDecision=deny`,
     d ? '' : `stdout=${JSON.stringify(String(r.stdout).slice(0, 60))} stderr=${String(r.stderr).trim().slice(0, 60)}`);
   check(r.status === 0, `${shell}：退出码 0`, `code=${r.status}`);
+}
+
+// fail-open：解释器缺失时命令必须仍以 exit 2 结束。
+// PreToolUse 只有 exit 2 才阻断——其余非零算非阻断错误、工具照常执行；
+// 实测 cmd.exe 下解释器缺失是 exit 0，连"出过错"都不留痕。
+// 这是全项目唯一已落地的强制点，而使用者的环境比开发机异质得多。
+{
+  const broken = command.replace(/^node\b/, 'zz-no-such-interpreter-qq');
+  for (const shell of shells) {
+    const r = runIn(shell, broken);
+    check(r.status === 2, `${shell}：解释器缺失时仍以 exit 2 阻断`, `实得退出码 ${r.status}`);
+  }
 }
 
 // 反向对照：证明这组用例真的抓得住那个失效模式。

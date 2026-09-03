@@ -338,9 +338,14 @@ function checkCommand(entry, opts) {
   if (!vet.ok) return { kind: 'command', status: 'refused', detail: vet.reason, cmd };
 
   const [prog, ...args] = vet.argv;
+  // 预算必须在花时间的那一层生效。只在 verify 入口查一次，等于让一条刚好
+  // 卡在 deadline 前开始的条目再花满一个 --timeout（默认 30 秒）。
+  const budgetedTimeout = opts.deadline
+    ? Math.max(200, Math.min(opts.timeout, opts.deadline - Date.now()))
+    : opts.timeout;
   const r = spawnSync(prog, args, {
     cwd: opts.cwd,
-    timeout: opts.timeout,
+    timeout: budgetedTimeout,
     encoding: 'utf8',
     shell: false,          // 关键：不经 shell
     windowsHide: true,
@@ -361,6 +366,7 @@ function checkCommand(entry, opts) {
 
   const output = `${r.stdout || ''}${r.stderr || ''}`;
   const want = readDigest(md);
+  if (want.invalid) return { kind: 'command', status: 'error', detail: `无法判定：${want.invalid}`, cmd };
   const wantExit = want.exit === undefined ? 0 : want.exit;
   const problems = [];
 
@@ -514,8 +520,16 @@ function toArray(v) {
  * 退出码统一转数字比较——`"0" !== 0` 会让每一条往返过的经验都判失败。
  */
 function readDigest(md) {
-  const nested = md.evidence_digest && typeof md.evidence_digest === 'object' && !Array.isArray(md.evidence_digest)
-    ? md.evidence_digest : {};
+  const raw = md.evidence_digest;
+  // mem0 把嵌套对象扁平化成 ["exit.0","contains.ok"] 这种字符串数组。
+  // 上一版对这个形状什么都不做——nested 分支不匹配、扁平字段又不存在，
+  // 于是 digest 静默消失、退回"默认期望 0"。一条声称 exit:128 的复现型
+  // 经验会因此被判 fail 且 verified:true，**正是唯一可据以淘汰的组合**。
+  // 拒绝比误解安全，与 vetCommand 对反斜杠引号的处理同理。
+  if (raw !== undefined && raw !== null && (Array.isArray(raw) || typeof raw !== 'object')) {
+    return { invalid: `evidence_digest 形状无法解析（${Array.isArray(raw) ? '数组，多半是 mem0 扁平化后的形状' : typeof raw}）——请改用 evidence_exit / evidence_contains / evidence_absent` };
+  }
+  const nested = raw && typeof raw === 'object' ? raw : {};
   // 空值等同于"没写"——字符串键值模型里空串就是没有值，此时退回嵌套形状。
   const present = (v) => v !== undefined && v !== null && String(v).trim() !== '' && !(Array.isArray(v) && v.length === 0);
   const pick = (flat, nest) => (present(flat) ? flat : nest);
@@ -527,7 +541,9 @@ function readDigest(md) {
   };
   if (present(rawExit)) {
     const n = Number(rawExit);
-    if (Number.isFinite(n)) out.exit = n;
+    // 存在但转不成数 → 判非法，不静默掉进"默认期望 0"
+    if (!Number.isFinite(n)) return { invalid: `退出码 ${JSON.stringify(rawExit)} 不是数字` };
+    out.exit = n;
   }
   return out;
 }
@@ -547,12 +563,18 @@ function belongsToRepo(entry, opts) {
   if (typeof claimed !== 'string' || claimed.trim() === '') {
     return { belongs: true, malformed: 'repo 不是非空字符串' };
   }
-  const run = (args) => {
-    const r = spawnSync('git', args, { cwd: opts.cwd, encoding: 'utf8', shell: false, windowsHide: true, timeout: 10000 });
-    return r.error || r.status !== 0 ? null : String(r.stdout).trim();
-  };
-  const top = run(['rev-parse', '--show-toplevel']);
-  const origin = run(['remote', 'get-url', 'origin']);
+  // 探测结果只跟 --cwd 有关，与条目无关。上一版每条都跑两次 git、
+  // 硬编码 10 秒超时——实测 5 条空条目里 617ms 全在这里，而注入前校验
+  // 挂在每轮提示上。改为整轮算一次并复用，超时由剩余预算派生。
+  if (!opts._repoProbe) {
+    const t = opts.deadline ? Math.max(200, Math.min(10000, opts.deadline - Date.now())) : 10000;
+    const run = (args) => {
+      const r = spawnSync('git', args, { cwd: opts.cwd, encoding: 'utf8', shell: false, windowsHide: true, timeout: t });
+      return r.error || r.status !== 0 ? null : String(r.stdout).trim();
+    };
+    opts._repoProbe = { top: run(['rev-parse', '--show-toplevel']), origin: run(['remote', 'get-url', 'origin']) };
+  }
+  const { top, origin } = opts._repoProbe;
   if (top === null && origin === null) return { belongs: true };   // 判不出来，不跳过
 
   const want = claimed.trim().toLowerCase().replace(/\.git$/, '');
@@ -609,17 +631,39 @@ function verify(entry, opts) {
     }
 
     const checks = [checkCommand(entry, opts), checkSymbols(entry, opts)];
-    // missing 不算失败：不是每条经验都带命令或符号。
-    // fail / refused 是"断言为假或不许验证"；error 是"无法判定"——
-    // 两者都不通过，但只有前者可以据以淘汰。
+
+    // verified 的含义是"**真的判定过**"，不是"没出错"。
+    //
+    // 上一版写的是 `verified: !unverifiable`，于是 missing 与 not-run 都被
+    // 算成"验过了"：一条 {"metadata":{}} 的空条目返回 verdict=pass、
+    // verified=true，而注入规则只排除 fail 与 verified:false——**什么都没验
+    // 的条目原样注入**，"注入前机器验过它声称的符号真的存在"这句话是空的。
+    // 而 verified 这个字段正是为了防"把没验证的说成验证过"才加的。
+    //
+    // 现在：至少有一项 check 给出 pass 或 fail 才算判定过。
+    //   fail     是判定（断言为假），计入 verified
+    //   refused  不是判定（我们拒绝去验），不计入——因此不会据以淘汰
+    //   error    是无法判定
+    //   missing / not-run 什么也没判
+    const decided = checks.some((c) => c.status === 'pass' || c.status === 'fail');
     const bad = checks.some((c) => c.status === 'fail' || c.status === 'refused');
     const unverifiable = checks.some((c) => c.status === 'error');
+    const verified = decided && !unverifiable;
+
+    if (!decided) {
+      checks.push({
+        kind: 'entry',
+        status: 'error',
+        detail: `没有任何一项被判定过（mode=${opts.mode}）——条目至少要带 symbols 或 files 才能在注入前被验证`,
+      });
+    }
+
     return {
       id,
       mode: opts.mode,
-      verdict: bad || unverifiable ? 'fail' : 'pass',
-      ok: !(bad || unverifiable),
-      verified: !unverifiable,
+      verdict: bad || unverifiable || !decided ? 'fail' : 'pass',
+      ok: !(bad || unverifiable || !decided),
+      verified,
       checks,
     };
   } catch (e) {

@@ -11,6 +11,11 @@
 //
 // 现在 JSON 由 node 生成，shell 只负责启动进程；hooks.json 里用双引号包路径
 // （POSIX sh 与 cmd.exe 都认双引号，都不认单引号）。
+//
+// hooks.json 里那个 `|| exit 2` 不是冗余：**node 不在 PATH 时本脚本根本不会
+// 运行**，而 sh 退 127、cmd 退 0——`PreToolUse` 只有 exit 2 才阻断，其余非零
+// 算非阻断错误、工具照常执行，cmd 下的 0 更是连"出过错"都不留痕。
+// 使用者的环境比开发机异质得多，这条 fail-open 在那边才是真风险。
 
 const reason = [
   '经验库不接受直接调用 mem0 的写入或删除工具。',

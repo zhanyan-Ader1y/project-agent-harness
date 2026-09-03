@@ -203,6 +203,22 @@ ok(JSON.stringify(M.readDigest({ evidence_contains: ['a', 'b'] }).contains) === 
 ok(M.readDigest({}).exit === undefined, '两种形状都没有 → exit 未声称（走默认期望 0）');
 ok(M.readDigest({ evidence_exit: '', evidence_digest: { exit: 3 } }).exit === 3, '扁平字段为空串时退回嵌套');
 {
+  // mem0 把嵌套对象扁平化成 ["exit.128","contains.x"]。上一版对这个形状
+  // 什么都不做——digest 静默消失、退回"默认期望 0"，于是一条声称 exit:128
+  // 的复现型经验被判 fail 且 verified:true，**正是唯一可据以淘汰的组合**。
+  const flat = M.readDigest({ evidence_digest: ['exit.128', 'contains.x'] });
+  ok(!!flat.invalid, '扁平化后的数组形状 → 判无法解析，不静默当作"没声称"', flat.invalid || JSON.stringify(flat));
+
+  const r = M.checkCommand(entry({
+    evidence_cmd: 'git rev-parse --verify zz-no-such-ref-qq',
+    evidence_digest: ['exit.128'],
+  }), opts);
+  ok(r.status === 'error', '带该形状的条目 → status error（→ verified false，不会被据以淘汰）', r.detail);
+
+  ok(!!M.readDigest({ evidence_exit: 'abc' }).invalid, '退出码不是数字 → 判无法解析，不掉进"默认期望 0"');
+  ok(!!M.readDigest({ evidence_digest: 'a string' }).invalid, '非对象非数组的 digest 同样判无法解析');
+}
+{
   // 若不转数字，"0" !== 0 会让每一条往返过的经验都判失败——
   // 而它们全部会走淘汰。这条用例守的是那个。
   const r = M.checkCommand(entry({
@@ -287,9 +303,26 @@ ok(M.DEFAULT_BUDGET.symbols === 2000 && M.DEFAULT_BUDGET.full === 0,
 }
 {
   // 单次检索的超时也要被剩余预算压住，否则一次 30 秒检索吃掉整轮。
-  const t0 = Date.now();
-  M.checkSymbols(entry({ symbols: ['ZzDefinitelyAbsentQqq'] }), { ...fx, timeout: 30000, budget: 400, deadline: Date.now() + 400 });
-  ok(Date.now() - t0 < 3000, '单次检索不超出剩余预算太多', `实耗 ${Date.now() - t0}ms`);
+  //
+  // 必须用一个**真会阻塞**的后端来测。上一版对着 fixture（3 个文件）测，
+  // 断言 <3000ms——而它本来就只要几十毫秒，把钳位代码整段删掉照样 PASS。
+  // 那是"判据证明不了任何事"的形态。
+  M.BACKENDS.zzslow = () => [process.execPath, ['-e', 'setTimeout(function(){process.exit(1)},5000)']];
+  try {
+    const slow = { ...fx, backend: 'zzslow', timeout: 30000 };
+    const bare = Date.now();
+    M.repoHasIdentifier('ZzAny', slow);
+    const unclamped = Date.now() - bare;
+
+    const t0 = Date.now();
+    M.checkSymbols(entry({ symbols: ['ZzAny'] }), { ...slow, budget: 600, deadline: Date.now() + 600 });
+    const clamped = Date.now() - t0;
+
+    ok(unclamped > 4000, '对照：不设预算时该后端确实阻塞约 5 秒（证明这条用例测得到东西）', `${unclamped}ms`);
+    ok(clamped < 2000, '设了预算时单次检索被压在剩余预算附近', `${clamped}ms（无预算时 ${unclamped}ms）`);
+  } finally {
+    delete M.BACKENDS.zzslow;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -326,7 +359,28 @@ g('无法判定必须与断言为假区分开');
 g('整体判定与畸形输入');
 ok(M.verify(entry({ evidence_cmd: 'git rev-parse --is-inside-work-tree' }), opts).ok === true, '命令通过、无符号 → ok');
 ok(M.verify(entry({ evidence_cmd: 'curl https://evil.example' }), opts).ok === false, 'refused 计入失败');
-ok(M.verify(entry({}), opts).ok === true, '两项皆 missing → 不判失败');
+{
+  // 上一版这里断言 `ok === true`（"两项皆 missing → 不判失败"），把一个
+  // 真缺陷锁成了正确行为：什么都没验的条目返回 verdict=pass、verified=true，
+  // 而注入规则只排除 fail 与 verified:false —— 于是它被原样注入，
+  // "注入前机器验过它声称的符号真的存在"这句话是空的。
+  const r = M.verify(entry({}), opts);
+  ok(r.verified === false, '什么都没判定过 → verified 必须为 false', JSON.stringify(r.verdict));
+  ok(r.verdict === 'fail', '什么都没判定过 → 不得判 pass（否则会被注入）');
+  ok(/没有任何一项被判定过/.test(JSON.stringify(r.checks)), '结果里说明了为什么没判定过');
+}
+{
+  // fail 是判定（断言为假），必须计入 verified —— 否则淘汰永远拿不到信号。
+  const r = M.verify(entry({ files: ['no/such/file.md'] }), fx);
+  ok(r.verdict === 'fail' && r.verified === true, 'fail 是判定，计入 verified');
+}
+{
+  // refused 不是判定（是我们拒绝去验），不得计入 —— 否则会据以淘汰，
+  // 等于用我们的允许列表去惩罚经验。
+  const r = M.verify(entry({ evidence_cmd: 'curl https://evil.example', files: ['DESIGN.md'] }), opts);
+  ok(r.verdict === 'fail', 'refused → 不通过');
+  ok(r.verified === true, 'refused 那一项不算判定，但同条目里 files 的 pass 算', JSON.stringify(r.checks.map((c) => c.status)));
+}
 for (const bad of [1, 'just a string', null, [1, 2], true]) {
   ok(M.verify(bad, opts).ok === false, `${JSON.stringify(bad)} → fail`);
 }
