@@ -7,8 +7,6 @@
 //   1. 重跑断言：按 evidence_cmd 实际执行，比对声称的退出码与输出特征
 //   2. 符号存在性：经验声称存在的文件与标识符，是否真的在代码库里
 //
-// 四个消费方：写入自检、注入前校验、库审计、淘汰判定。
-//
 // 用法：
 //   node assert-replay.js <entry.json>      单条
 //   node assert-replay.js -                 从 stdin 读 JSON 或 JSONL
@@ -16,9 +14,17 @@
 //     --cwd <dir>       在哪个仓库里跑与查（默认当前目录，必须存在）
 //     --timeout <ms>    单条命令超时（默认 30000）
 //     --allow <a,b,c>   追加允许执行的程序；追加的程序**不允许携带任何选项**
+//     --backend <name>  强制符号检索后端（rg | grep），默认按可用性回退
 //     --quiet           只输出 JSON，不输出人类可读摘要
 //
 // 退出码：0 = 无失败；1 = 有条目未通过；2 = 用法或输入错误。
+//
+// 输出的每条结果带三个判定字段，消费方必须区别对待：
+//   verdict   pass | fail | skipped
+//   ok        没有检出失败（skipped 也是 true）
+//   verified  **是否真的验证过**。skipped、工具不可用等情形为 false。
+//             淘汰判定只能对 verdict==='fail' 且 verified===true 的条目生效；
+//             注入前校验必须把 verified===false 当作不可采信。
 
 const fs = require('fs');
 const path = require('path');
@@ -30,44 +36,46 @@ const { spawnSync } = require('child_process');
 // evidence_cmd 是团队共享云端库里的一段文本，重跑它等于让任何能写入该库的
 // 人在每个成员机器上执行命令。红线过滤挡的是数据出去，这里挡的是代码进来。
 //
-// 2026-09-02 的落地评审实测证明：**只按程序名做白名单不构成边界。**
-// 三条无 shell 元字符、通过程序名白名单、且全部返回 pass 的攻击：
-//   - "/tmp/fakebin/git.exe"                       basename 是 git，执行的是别的
-//   - "git ls-remote --upload-pack=/tmp/payload"   git 会真的拉起那个程序
-//   - "find . -maxdepth 0 -fprintf /tmp/x line\n"  写出带换行的任意文件
-// 同族还有 rg --pre、npm install（postinstall）、go run …@latest、make -f。
+// 两轮独立评审各实测出一批可执行的攻击，形态逐轮变深：
 //
-// 因此边界下沉到**子命令 + 逐个选项**：
-//   1. 程序名必须是裸名——含路径分隔符一律拒绝，杜绝假冒二进制
-//   2. 子命令必须在该程序的允许列表内
-//   3. **每一个选项都必须被显式允许**，未列举即拒绝（而非列举危险项去拦）
-//   4. 所有位置参数与选项取值都必须落在 --cwd 之内（拒绝绝对路径与 .. 段）
+// 第一轮（程序名白名单不构成边界）：
+//   "/tmp/fakebin/git.exe"                        basename 是 git，执行的是别的
+//   "git ls-remote --upload-pack=/tmp/payload"    git 会真的拉起那个程序
+//   "find . -maxdepth 0 -fprintf /tmp/x line"     写出带换行的任意文件
 //
-// 拒绝是安全的失败方向：被拒按失败计，不按"没检查"计。要放宽必须改这张表，
-// 是一次有意的动作。
+// 第二轮（词法路径检查不构成边界）：
+//   "cat ~/.gitconfig"        MSYS 的 coreutils 从非 Cygwin 父进程启动时
+//   "cat ~/.ssh/*.pub"        会**自行**做 tilde 展开与 globbing，不经 shell 也一样
+//   "cat etc-link/hosts"      符号链接在词法上完全合规（任何平台）
+//
+// 教训是同一条：**边界必须画在它真正生效的那一层。** 在字符串上画，看不见
+// ~ 会变成什么，也看不见链接指向哪。因此现在是五道：
+//   1. 拒绝 shell 元字符、glob 字符、控制字符、~ 开头、反斜杠转义引号
+//   2. 不经 shell 执行——元字符即便漏网也不生效
+//   3. 程序名必须是裸名——含路径分隔符一律拒绝，杜绝假冒二进制
+//   4. 子命令与**每一个选项**都必须被显式允许，未列举即拒绝
+//   5. 每个路径形态的参数做 **realpath 物理围栏**，必须落在 realpath(cwd) 之内
+//
+// 拒绝是安全的失败方向。要放宽只能改 COMMAND_RULES，是一次有意的动作。
 // ===========================================================================
-
-// 选项名归一：--flag=value -> --flag；组合短选项 -rn 展开为 -r -n
-function normalizeFlags(arg) {
-  const name = arg.split('=')[0];
-  if (/^-[A-Za-z]{2,}$/.test(name)) return name.slice(1).split('').map((c) => `-${c}`);
-  return [name];
-}
 
 const N = /^-n?\d+$/; // -5 / -n5 这类计数短选项
 
-const COMMAND_RULES = {
+// 用 Object.create(null)：普通对象字面量会让 "toString" / "__proto__" /
+// "hasOwnProperty" 等原型链上的成员被当成"命中的规则"，随后 rule.flags
+// 为 undefined 而抛异常，一条 12 字节的畸形条目就能废掉整批校验。
+const COMMAND_RULES = Object.assign(Object.create(null), {
   git: {
+    // 只留读操作。branch / tag 曾在此列，实测能在成员机器上真的建出 ref。
     subcommands: ['status', 'log', 'rev-parse', 'show', 'diff', 'ls-files', 'grep',
-      'describe', 'blame', 'shortlog', 'cat-file', 'branch', 'tag', 'ls-tree'],
+      'describe', 'blame', 'shortlog', 'cat-file', 'ls-tree'],
     flags: ['--oneline', '--porcelain', '--stat', '--numstat', '--name-only', '--name-status',
       '--short', '--abbrev-ref', '--verify', '--is-inside-work-tree', '--show-toplevel',
       '--count', '--all', '--no-color', '--color', '--pretty', '--format', '--grep',
       '--author', '--since', '--until', '--max-count', '--follow', '--reverse',
-      '-n', '-q', '-w', '-i', '-l', '-c1', '--word-regexp', '--fixed-strings', '--', N],
-    // 显式不允许（列在此处仅为说明；判定靠上面的允许列表）：
-    //   --upload-pack --receive-pack --exec-path -c --config-env --output -O --pager
-    //   --ext-diff --textconv  —— 全部能拉起外部程序或写宿主配置
+      '-n', '-q', '-w', '-i', '-l', '--word-regexp', '--fixed-strings', '--', N],
+    // 不允许：--upload-pack --receive-pack --exec-path -c --config-env
+    //         --output -O --pager --ext-diff --textconv
   },
   rg: {
     subcommands: null,
@@ -89,29 +97,36 @@ const COMMAND_RULES = {
   cat: { subcommands: null, flags: ['-n', '-A', '--'] },
   diff: { subcommands: null, flags: ['-u', '-r', '-q', '-N', '-w', '-b', '--brief', '--'] },
 
-  // 测试与构建入口。子命令收得很紧：install / run / get / exec 这类会从公网
-  // 拉第三方代码执行，信任边界会从"本仓库"扩大到"任意包名"。
+  // 测试入口。子命令收得很紧：install / run / get / exec 会从公网拉第三方
+  // 代码执行，信任边界会从"本仓库"扩大到"任意包名"。
+  // singleDashLong：这些程序用 -run / -count 这类单横线长选项，不能按
+  // 组合短选项展开——否则 -run 会被拆成 -r -u -n 而全部拒绝。
   go: {
     subcommands: ['test', 'vet', 'list', 'build'],
+    singleDashLong: true,
     flags: ['-run', '-count', '-v', '-short', '-race', '-timeout', '-tags', '-json', '--'],
-    // 不允许：run / install / get / generate 子命令；-exec -toolexec -ldflags 选项
   },
   npm: { subcommands: ['test'], flags: ['--'] },
   pnpm: { subcommands: ['test'], flags: ['--'] },
   yarn: { subcommands: ['test'], flags: ['--'] },
   cargo: { subcommands: ['test'], flags: ['--quiet', '-q', '--'] },
   pytest: { subcommands: null, flags: ['-q', '-x', '-v', '-k', '--maxfail', '--tb', '--'] },
-  make: { subcommands: null, flags: [] }, // 无选项：挡住 -f /tmp/evil.mk
-};
+  // make 的变量覆盖走位置参数（make SHELL=/tmp/evil.sh 能改掉每条 recipe 的
+  // 执行程序），因此位置参数不许含 =。
+  make: { subcommands: null, flags: [], noEqualsInPositional: true },
+});
 
-// 上一版白名单里被本次移除的程序，及理由（不要再加回来，除非能逐个选项收紧）：
+// 上一版白名单里被移除的程序，及理由（不要再加回来，除非能逐个选项收紧）：
 //   find    -fprintf / -fls 写任意文件，-exec 起任意程序
 //   mvn     <group>:<artifact>:<ver>:run 执行任意插件
 //   gradle  init script / 任务即代码
 //   dotnet  dotnet <任意.dll>
-//   test    无用
 
 const SHELL_METACHARS = /[;&|<>`$(){}\n\r]/;
+const GLOB_CHARS = /[*?[\]]/;      // 被调程序会自行展开，不经 shell 也一样
+const CONTROL_CHARS = /[\x00-\x1f\x7f]/; // NUL 会让 spawnSync 抛异常
+
+const LIMITS = { files: 20, symbols: 20 };
 
 /** 按空白切分，尊重成对引号；不做任何展开。反斜杠转义不支持，见 vetCommand。 */
 function tokenize(cmd) {
@@ -139,28 +154,64 @@ function tokenize(cmd) {
   return out;
 }
 
-/** 位置参数与选项取值必须落在仓库内：拒绝绝对路径与 .. 路径段。 */
+/** 词法围栏：绝对路径与 .. 路径段。realpath 之前的第一道。 */
 function escapesRepo(value) {
   if (value === '') return false;
-  if (path.isAbsolute(value) || /^[A-Za-z]:[\\/]/.test(value)) return true;
+  if (path.isAbsolute(value) || /^[A-Za-z]:/.test(value)) return true;
   return value.split(/[\\/]/).includes('..');
+}
+
+/**
+ * 物理围栏：若该值确实指向一个存在的路径，解析符号链接后必须仍在 realpath(cwd)
+ * 之内。解析不到（多半是模式串而非路径）就交给词法围栏。
+ *
+ * 这一道是词法检查补不上的：etc-link -> C:\Windows\System32\drivers\etc
+ * 在词法上完全合规。
+ */
+function escapesRepoPhysically(value, realCwd) {
+  if (value === '') return false;
+  let real;
+  try {
+    real = fs.realpathSync.native(path.resolve(realCwd, value));
+  } catch (_) {
+    return false;   // 不是现存路径
+  }
+  const rel = path.relative(realCwd, real);
+  return rel !== '' && (rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel));
+}
+
+/** 选项名归一。整名优先——否则 go 的 -run 会被拆成 -r -u -n 而全部拒绝。 */
+function normalizeFlags(arg, rule) {
+  const name = arg.split('=')[0];
+  if (rule && rule.singleDashLong) return [name];
+  if (flagAllowed(name, (rule && rule.flags) || [])) return [name];
+  if (/^-[A-Za-z]{2,}$/.test(name)) return name.slice(1).split('').map((c) => `-${c}`);
+  return [name];
 }
 
 function flagAllowed(name, allowed) {
   return allowed.some((a) => (a instanceof RegExp ? a.test(name) : a === name));
 }
 
-/** @returns {{ok: true, argv: string[]} | {ok: false, reason: string}} */
-function vetCommand(cmd, extraAllow) {
+/**
+ * @param {string} cmd
+ * @param {{allow: Set<string>, cwd: string}} opts
+ * @returns {{ok: true, argv: string[]} | {ok: false, reason: string}}
+ */
+function vetCommand(cmd, opts) {
   if (typeof cmd !== 'string' || cmd.trim() === '') {
     return { ok: false, reason: 'evidence_cmd 为空' };
   }
-  const meta = cmd.match(SHELL_METACHARS);
-  if (meta) {
-    return { ok: false, reason: `含 shell 元字符 ${JSON.stringify(meta[0])}——不允许串接、重定向或命令替换` };
+  for (const [re, why] of [
+    [CONTROL_CHARS, '含控制字符'],
+    [SHELL_METACHARS, '含 shell 元字符——不允许串接、重定向或命令替换'],
+    [GLOB_CHARS, '含 glob 字符——被调程序会自行展开，不经 shell 也一样'],
+  ]) {
+    const m = cmd.match(re);
+    if (m) return { ok: false, reason: `${why}：${JSON.stringify(m[0])}` };
   }
   if (/\\["']/.test(cmd)) {
-    // 分词器不支持反斜杠转义，会把 \" 里的 " 当成闭合引号，静默改写参数。
+    // 分词器不支持反斜杠转义，会把 \" 里的 " 当成闭合引号、静默改写参数。
     // 拒绝比误解安全——评审者在库里读到的命令，必须就是实际执行的那条。
     return { ok: false, reason: '含反斜杠转义的引号——分词器不支持，会静默改写参数' };
   }
@@ -175,14 +226,27 @@ function vetCommand(cmd, extraAllow) {
 
   const prog = argv[0];
   if (/[\\/]/.test(prog)) {
-    // 上一版取 basename 判白名单、却执行原样路径，于是 /tmp/evil/git 被放行。
     return { ok: false, reason: `程序名含路径分隔符：${JSON.stringify(prog)}——只允许裸程序名，由 PATH 解析` };
   }
 
-  const rule = COMMAND_RULES[prog] || (extraAllow.has(prog) ? { subcommands: null, flags: [] } : null);
-  if (!rule) {
-    return { ok: false, reason: `程序 ${JSON.stringify(prog)} 不在允许列表内` };
+  const rule = Object.prototype.hasOwnProperty.call(COMMAND_RULES, prog)
+    ? COMMAND_RULES[prog]
+    : (opts.allow.has(prog) ? { subcommands: null, flags: [] } : null);
+  if (!rule) return { ok: false, reason: `程序 ${JSON.stringify(prog)} 不在允许列表内` };
+
+  let realCwd;
+  try {
+    realCwd = fs.realpathSync.native(opts.cwd);
+  } catch (e) {
+    return { ok: false, reason: `无法解析 --cwd：${e.message}` };
   }
+
+  const vetValue = (v, label) => {
+    if (v.startsWith('~')) return `${label}以 ~ 开头——被调程序会展开到 home：${JSON.stringify(v)}`;
+    if (escapesRepo(v)) return `${label}越出仓库：${JSON.stringify(v)}——绝对路径与 .. 一律拒绝`;
+    if (escapesRepoPhysically(v, realCwd)) return `${label}经符号链接指向仓库之外：${JSON.stringify(v)}`;
+    return null;
+  };
 
   let i = 1;
   if (rule.subcommands) {
@@ -196,17 +260,26 @@ function vetCommand(cmd, extraAllow) {
   for (; i < argv.length; i++) {
     const arg = argv[i];
     if (arg.startsWith('-') && arg !== '-') {
-      for (const name of normalizeFlags(arg)) {
+      for (const name of normalizeFlags(arg, rule)) {
         if (!flagAllowed(name, rule.flags)) {
           return { ok: false, reason: `${prog} 不允许选项 ${JSON.stringify(name)}——未列举的选项一律拒绝` };
         }
       }
       const eq = arg.indexOf('=');
-      if (eq !== -1 && escapesRepo(arg.slice(eq + 1))) {
-        return { ok: false, reason: `选项取值越出仓库：${JSON.stringify(arg)}` };
+      if (eq !== -1) {
+        const bad = vetValue(arg.slice(eq + 1), '选项取值');
+        if (bad) return { ok: false, reason: bad };
       }
-    } else if (escapesRepo(arg)) {
-      return { ok: false, reason: `参数越出仓库：${JSON.stringify(arg)}——绝对路径与 .. 一律拒绝` };
+    } else {
+      // 位置参数也要拆一次 = ：make SHELL=/tmp/evil.sh 走的正是这条。
+      const eq = arg.indexOf('=');
+      if (eq !== -1 && rule.noEqualsInPositional) {
+        return { ok: false, reason: `${prog} 的位置参数不允许含 = ：${JSON.stringify(arg)}` };
+      }
+      for (const part of eq === -1 ? [arg] : [arg.slice(0, eq), arg.slice(eq + 1)]) {
+        const bad = vetValue(part, '参数');
+        if (bad) return { ok: false, reason: bad };
+      }
     }
   }
 
@@ -221,7 +294,8 @@ function vetCommand(cmd, extraAllow) {
  * evidence_digest 是「退出码 + 输出摘要」的可判定形式：
  *   { "exit": 0, "contains": ["ok  "], "absent": ["FAIL"] }
  * 三项均可省；**省略 exit 时默认期望 0**——「命令跑不通」必须能被检出，
- * 否则淘汰判据「evidence_cmd 跑不通 → 标 stale」拿不到信号。
+ * 否则淘汰判据「evidence_cmd 跑不通 → 标 stale」拿不到信号。复现型命令
+ * （期望非零退出码）必须显式写 exit，否则会被判失败。
  *
  * 不比对完整输出：重跑几乎不会逐字节相同（时间戳、路径、耗时）。比对退出码
  * 与特征串既稳定，又抓得住"跑了但抄错"——前身实测过的形态是原始输出 11 行
@@ -234,10 +308,8 @@ function checkCommand(entry, opts) {
     return { kind: 'command', status: 'missing', detail: '条目没有 evidence_cmd' };
   }
 
-  const vet = vetCommand(cmd, opts.allow);
-  if (!vet.ok) {
-    return { kind: 'command', status: 'refused', detail: vet.reason, cmd };
-  }
+  const vet = vetCommand(cmd, opts);
+  if (!vet.ok) return { kind: 'command', status: 'refused', detail: vet.reason, cmd };
 
   const [prog, ...args] = vet.argv;
   const r = spawnSync(prog, args, {
@@ -258,7 +330,6 @@ function checkCommand(entry, opts) {
     return { kind: 'command', status: 'fail', detail: `无法完成：${why}`, cmd };
   }
   if (r.status === null) {
-    // 被信号杀死（SIGSEGV、OOM kill 等）。没有退出码可比，不能算通过。
     return { kind: 'command', status: 'fail', detail: `被信号 ${r.signal || '未知'} 终止`, cmd };
   }
 
@@ -304,6 +375,15 @@ function checkSymbols(entry, opts) {
   if (files.length === 0 && symbols.length === 0) {
     return { kind: 'symbol', status: 'missing', detail: '条目没有 files 也没有 symbols' };
   }
+  // 每个符号一次全仓检索，而本检查挂在每轮提示上：一条 300 符号的条目
+  // 实测耗时 13.5 秒。数量必须封顶，否则共享库里的条目能拖垮每一轮。
+  if (files.length > LIMITS.files || symbols.length > LIMITS.symbols) {
+    return {
+      kind: 'symbol',
+      status: 'fail',
+      detail: `条目声称 ${files.length} 个文件、${symbols.length} 个符号，超出上限（各 ${LIMITS.files}/${LIMITS.symbols}）`,
+    };
+  }
 
   const problems = [];
   const undetermined = [];
@@ -312,13 +392,11 @@ function checkSymbols(entry, opts) {
     const s = String(f);
     if (s.trim() === '' || s === '.' || s === './') {
       problems.push(`路径 ${JSON.stringify(s)} 不指向具体文件——空断言恒真，不接受`);
-      continue;
-    }
-    if (escapesRepo(s)) {
+    } else if (s.startsWith('~') || escapesRepo(s)) {
       problems.push(`路径 ${JSON.stringify(s)} 不是仓库相对路径`);
-      continue;
-    }
-    if (!fs.existsSync(path.join(opts.cwd, s))) {
+    } else if (escapesRepoPhysically(s, opts.realCwd || opts.cwd)) {
+      problems.push(`路径 ${JSON.stringify(s)} 经符号链接指向仓库之外`);
+    } else if (!fs.existsSync(path.join(opts.cwd, s))) {
       problems.push(`文件不存在：${s}`);
     }
   }
@@ -339,31 +417,30 @@ function checkSymbols(entry, opts) {
 
   if (problems.length > 0) return { kind: 'symbol', status: 'fail', detail: problems.join('；') };
   if (undetermined.length > 0) {
-    // 查不动 ≠ 不存在。判 error（计入失败）而不是 fail，让调用方知道是工具问题。
+    // 查不动 ≠ 不存在。判 error 并让整条 verified=false，否则一台没装
+    // rg 也没装 grep 的机器跑一次全库审计会把所有带 symbols 的条目标 stale。
     return { kind: 'symbol', status: 'error', detail: `无法判定：${undetermined.join('；')}` };
   }
   return { kind: 'symbol', status: 'pass', detail: `${files.length} 个文件、${symbols.length} 个符号均存在` };
 }
 
-/**
- * rg 与 grep 的默认语义完全不同——rg 尊重 .gitignore、跳过隐藏目录与二进制，
- * grep -r 全都搜。若不统一，同一条经验在装了 rg 和没装 rg 的机器上会得到
- * 相反结论：一边把 dist/ 里的符号判成"查无踪迹"（误杀），另一边因为某条
- * commit message 提过这个词就判"存在"（放过编造）。
- *
- * 统一为「搜全部工作树文件，但排除 .git，跳过二进制」。
- *
- * @returns {{found: boolean} | {undetermined: string}}
- */
+const BACKENDS = {
+  // rg 默认尊重 .gitignore、跳过隐藏目录与二进制；grep -r 全都搜。
+  // 若不统一，同一条经验在装了 rg 和没装 rg 的机器上会得到相反结论。
+  // 统一为「搜全部工作树文件，排除 .git，跳过二进制」。
+  rg: (ident) => ['rg', ['--no-ignore', '--hidden', '--glob', '!.git/**',
+    '--fixed-strings', '--word-regexp', '--quiet', '--', ident, '.']],
+  grep: (ident) => ['grep', ['-r', '-I', '-s', '-F', '-w', '-q', '--exclude-dir=.git', '--', ident, '.']],
+};
+
+/** @returns {{found: boolean} | {undetermined: string}} */
 function repoHasIdentifier(ident, opts) {
-  const backends = [
-    // rg 默认即跳过二进制文件；grep 需显式 -I 才能与之一致。
-    ['rg', ['--no-ignore', '--hidden', '--glob', '!.git/**',
-      '--fixed-strings', '--word-regexp', '--quiet', '--', ident, '.']],
-    ['grep', ['-r', '-I', '-s', '-F', '-w', '-q', '--exclude-dir=.git', '--', ident, '.']],
-  ];
+  const names = opts.backend ? [opts.backend] : ['rg', 'grep'];
   const notes = [];
-  for (const [prog, args] of backends) {
+  for (const name of names) {
+    const make = BACKENDS[name];
+    if (!make) return { undetermined: `未知后端 ${name}` };
+    const [prog, args] = make(ident);
     const r = spawnSync(prog, args, {
       cwd: opts.cwd, timeout: opts.timeout, shell: false, windowsHide: true, encoding: 'utf8',
     });
@@ -375,10 +452,9 @@ function repoHasIdentifier(ident, opts) {
     }
     if (r.status === 0) return { found: true };
     if (r.status === 1) return { found: false };
-    // >= 2 是工具自身出错（权限、编码），不是"没找到"
     return { undetermined: `${prog} 退出码 ${r.status}：${(r.stderr || '').trim().slice(0, 120)}` };
   }
-  return { undetermined: notes.join('、') || 'rg 与 grep 均不可用' };
+  return { undetermined: notes.join('、') || '没有可用的检索后端' };
 }
 
 // ===========================================================================
@@ -391,51 +467,84 @@ function toArray(v) {
 /**
  * 经验跨仓库共享。拿一个仓库当 --cwd 跑全库审计，来自其它仓库的条目会集体
  * 判为文件不存在、命令跑不通——一次审计就能把大半个库误标为失效。
- * 因此先判本条是否属于当前仓库；判不出来时**不跳过**（宁可多验，不可漏验）。
+ *
+ * 但 repo 是条目自带的字段，因此它同时是一个**条目可自选的免检开关**。
+ * 出口在 verified：跳过的条目 verified=false，注入前校验必须把它当作不可
+ * 采信（不注入），淘汰判定必须不对它生效。这样"自称属于别的仓库"换来的
+ * 是不被采用，而不是免检通过。
  */
 function belongsToRepo(entry, opts) {
   const claimed = entry.metadata && entry.metadata.repo;
-  if (!claimed) return true;
+  if (claimed === undefined || claimed === null) return { belongs: true };
+  if (typeof claimed !== 'string' || claimed.trim() === '') {
+    return { belongs: true, malformed: 'repo 不是非空字符串' };
+  }
   const run = (args) => {
     const r = spawnSync('git', args, { cwd: opts.cwd, encoding: 'utf8', shell: false, windowsHide: true, timeout: 10000 });
     return r.error || r.status !== 0 ? null : String(r.stdout).trim();
   };
   const top = run(['rev-parse', '--show-toplevel']);
   const origin = run(['remote', 'get-url', 'origin']);
-  if (top === null && origin === null) return true;   // 判不出来，不跳过
-  const c = String(claimed).toLowerCase();
-  const hay = [top && path.basename(top), origin].filter(Boolean).join(' ').toLowerCase();
-  return hay.includes(c) || (top !== null && path.basename(top).toLowerCase() === c);
+  if (top === null && origin === null) return { belongs: true };   // 判不出来，不跳过
+
+  const want = claimed.trim().toLowerCase().replace(/\.git$/, '');
+  const names = [];
+  if (top) names.push(path.basename(top).toLowerCase());
+  if (origin) {
+    // 取 remote URL 的最后一到两段，做**整段相等**比较——用 includes 会让
+    // repo:"a" 命中几乎任何仓库。
+    const segs = origin.toLowerCase().replace(/\.git$/, '').split(/[\\/:]/).filter(Boolean);
+    if (segs.length) names.push(segs[segs.length - 1]);
+    if (segs.length >= 2) names.push(`${segs[segs.length - 2]}/${segs[segs.length - 1]}`);
+  }
+  return { belongs: names.includes(want) };
 }
 
 function verify(entry, opts) {
+  const fail = (detail, id = null) => ({
+    id, verdict: 'fail', ok: false, verified: false,
+    checks: [{ kind: 'entry', status: 'error', detail }],
+  });
+
   if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
-    return {
-      id: null,
-      verdict: 'fail',
-      ok: false,
-      checks: [{ kind: 'entry', status: 'error', detail: `条目不是对象：${JSON.stringify(entry)}` }],
-    };
+    return fail(`条目不是对象：${JSON.stringify(entry)}`);
   }
   const id = entry.id || (entry.metadata && entry.metadata.id) || null;
   if (entry.metadata !== undefined && (entry.metadata === null || typeof entry.metadata !== 'object' || Array.isArray(entry.metadata))) {
-    return { id, verdict: 'fail', ok: false, checks: [{ kind: 'entry', status: 'error', detail: 'metadata 不是对象' }] };
+    return fail('metadata 不是对象', id);
   }
 
-  if (!belongsToRepo(entry, opts)) {
+  try {
+    const b = belongsToRepo(entry, opts);
+    if (b.malformed) return fail(b.malformed, id);
+    if (!b.belongs) {
+      return {
+        id,
+        verdict: 'skipped',
+        ok: true,
+        verified: false,   // 关键：没验过就是没验过，消费方不得当作通过
+        checks: [{ kind: 'entry', status: 'skipped', detail: `条目属于仓库 ${entry.metadata.repo}，与当前 --cwd 不符` }],
+      };
+    }
+
+    const checks = [checkCommand(entry, opts), checkSymbols(entry, opts)];
+    // missing 不算失败：不是每条经验都带命令或符号。
+    // fail / refused 是"断言为假或不许验证"；error 是"无法判定"——
+    // 两者都不通过，但只有前者可以据以淘汰。
+    const bad = checks.some((c) => c.status === 'fail' || c.status === 'refused');
+    const unverifiable = checks.some((c) => c.status === 'error');
     return {
       id,
-      verdict: 'skipped',
-      ok: true,
-      checks: [{ kind: 'entry', status: 'skipped', detail: `条目属于仓库 ${entry.metadata.repo}，与当前 --cwd 不符` }],
+      verdict: bad || unverifiable ? 'fail' : 'pass',
+      ok: !(bad || unverifiable),
+      verified: !unverifiable,
+      checks,
     };
+  } catch (e) {
+    // 单条的异常必须留在单条内。否则共享库里一条畸形条目会让整批中止，
+    // 而注入前校验挂在每轮提示上——每个成员的每一轮都会拿不到结论。
+    return fail(`校验时异常：${(e && e.message) || e}`, id);
   }
-
-  const checks = [checkCommand(entry, opts), checkSymbols(entry, opts)];
-  // missing 不算失败：不是每条经验都带命令或符号。
-  // refused / error 算失败——无法验证与验证不过，对采信者是同一件事。
-  const bad = checks.some((c) => c.status === 'fail' || c.status === 'refused' || c.status === 'error');
-  return { id, verdict: bad ? 'fail' : 'pass', ok: !bad, checks };
 }
 
 function parseEntries(text) {
@@ -456,10 +565,10 @@ function parseEntries(text) {
 }
 
 function main(argv) {
-  const opts = { cwd: process.cwd(), timeout: 30000, allow: new Set(), quiet: false };
+  const opts = { cwd: process.cwd(), timeout: 30000, allow: new Set(), quiet: false, backend: null };
   const rest = [];
   const needValue = (flag, v) => {
-    if (v === undefined || String(v).startsWith('--')) throw new Error(`${flag} 缺少取值`);
+    if (v === undefined || String(v).startsWith('-')) throw new Error(`${flag} 缺少取值`);
     return v;
   };
   try {
@@ -467,6 +576,7 @@ function main(argv) {
       const a = argv[i];
       if (a === '--cwd') opts.cwd = needValue('--cwd', argv[++i]);
       else if (a === '--timeout') opts.timeout = Number(needValue('--timeout', argv[++i]));
+      else if (a === '--backend') opts.backend = needValue('--backend', argv[++i]);
       else if (a === '--allow') String(needValue('--allow', argv[++i])).split(',').forEach((s) => s.trim() && opts.allow.add(s.trim()));
       else if (a === '--quiet') opts.quiet = true;
       else if (a.startsWith('--')) throw new Error(`未知选项 ${a}`);
@@ -474,9 +584,11 @@ function main(argv) {
     }
     if (rest.length !== 1) throw new Error('需要且只需要一个输入（文件路径或 -）');
     if (!Number.isFinite(opts.timeout) || opts.timeout <= 0) throw new Error('--timeout 必须是正数（毫秒）');
+    if (opts.backend && !BACKENDS[opts.backend]) throw new Error(`--backend 只能是 ${Object.keys(BACKENDS).join(' 或 ')}`);
     if (!fs.existsSync(opts.cwd) || !fs.statSync(opts.cwd).isDirectory()) throw new Error(`--cwd 不是存在的目录：${opts.cwd}`);
+    opts.realCwd = fs.realpathSync.native(opts.cwd);
   } catch (e) {
-    process.stderr.write(`${e.message}\n用法：node assert-replay.js <entry.json|-> [--cwd dir] [--timeout ms] [--allow a,b] [--quiet]\n`);
+    process.stderr.write(`${e.message}\n用法：node assert-replay.js <entry.json|-> [--cwd dir] [--timeout ms] [--allow a,b] [--backend rg|grep] [--quiet]\n`);
     return 2;
   }
 
@@ -489,21 +601,12 @@ function main(argv) {
     return 2;
   }
 
-  let results;
-  try {
-    results = entries.map((e) => verify(e, opts));
-  } catch (e) {
-    // 内部异常必须退 2，不能与"有条目未通过"的 1 撞码——
-    // 否则调用方会把一次崩溃读成一次正常的验证失败。
-    process.stderr.write(`内部错误：${e && e.stack ? e.stack : e}\n`);
-    return 2;
-  }
-
+  const results = entries.map((e) => verify(e, opts));
   process.stdout.write(JSON.stringify(results, null, 2) + '\n');
 
   if (!opts.quiet) {
     for (const r of results) {
-      process.stderr.write(`${r.verdict.toUpperCase().padEnd(7)} ${r.id || '(无 id)'}\n`);
+      process.stderr.write(`${r.verdict.toUpperCase().padEnd(7)} ${r.verified ? '' : '[未验证] '}${r.id || '(无 id)'}\n`);
       for (const c of r.checks) {
         process.stderr.write(`    ${c.status.padEnd(9)} ${c.kind.padEnd(8)} ${c.detail}\n`);
       }
@@ -518,6 +621,7 @@ if (require.main === module) {
 }
 
 module.exports = {
-  tokenize, normalizeFlags, escapesRepo, vetCommand, checkCommand, checkSymbols,
-  repoHasIdentifier, belongsToRepo, verify, parseEntries, main, COMMAND_RULES,
+  tokenize, normalizeFlags, escapesRepo, escapesRepoPhysically, vetCommand,
+  checkCommand, checkSymbols, repoHasIdentifier, belongsToRepo, verify,
+  parseEntries, main, COMMAND_RULES, BACKENDS, LIMITS,
 };

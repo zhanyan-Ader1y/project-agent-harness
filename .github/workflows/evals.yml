@@ -9,27 +9,31 @@ on:
     branches: [main]
   pull_request:
     paths:
-      - 'plugins/**/skills/**'
-      - 'plugins/**/hooks/**'
-      - 'plugins/**/scripts/**'
+      # plugin 名与 MCP server 名决定 hook matcher 的前缀，改它们必须重跑，
+      # 所以覆盖整个 plugins/ 与 .claude-plugin/，不只是 skills/hooks/scripts。
+      - 'plugins/**'
+      - '.claude-plugin/**'
       - 'evals/**'
       - '.github/workflows/evals.yml'
 
 jobs:
   evals:
-    runs-on: ubuntu-latest
+    # 已知的静默失效点几乎都是 Windows 特有的：MSYS coreutils 自行展开 ~ 与
+    # glob、`echo '单引号 JSON'` 在 cmd.exe 下解析失败。只跑 ubuntu 等于
+    # 那些用例在门禁里一次也不执行。
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          # 符号检查的 fixture 依赖工作树完整；浅克隆够用，但 git 相关的
-          # evidence_cmd 用例需要一个真实的 .git 目录。
-          fetch-depth: 1
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - name: 安装 ripgrep
-        # 符号检查在 rg 与 grep 之间回退。两者都装上，才能保证 CI 走的是
-        # 与开发机相同的那条路径。
+      - name: 安装 ripgrep（Linux）
+        # 符号检查在 rg 与 grep 之间回退，用例对两个后端各断言一遍。
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y ripgrep
       - name: 跑全部 eval
         run: node evals/run-all.js
