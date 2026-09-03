@@ -10,7 +10,8 @@
 
 | 路径 | 内容 |
 | --- | --- |
-| [`DESIGN.md`](DESIGN.md) | 设计全文：决策、依据、前提假设与退路 |
+| [`DESIGN.md`](DESIGN.md) | 设计：**最小可用发布**所需的决策、依据、前提假设与退路 |
+| [`docs/deferred.md`](docs/deferred.md) | 分档移出的设计：原文 + 为什么不在最小可用 + **拿回条件** |
 | [`plugins/experience/`](plugins/experience/) | 经验沉淀插件（唯一在建） |
 | [`evals/`](evals/) | 评测用例。skill / hook / 脚本一变更即跑 |
 | [`docs/references/`](docs/references/) | 外部参考的提炼，各带来源与读取日期 |
@@ -54,6 +55,6 @@ node evals/run-all.js                        # 全部评测用例
 
 `skills/`、`scripts/experience-write` 刻意未建空壳，理由见[插件 README](plugins/experience/README.md)。
 
-**凭据到位后的第一件事**是对 mem0 端点跑一次 `tools/list`——当前 hook matcher 里的工具名取自官方文档，**从未对活端点确认过**（2026-09-02 未认证请求返回 401）。若真实名称不同，闸门整条失效。
+**mem0 的行为已于 2026-09-03 对活端点实测**：工具名、`infer=false` 的效果、metadata 的序列化形状、按 metadata 过滤、异步索引延迟——结论见 `DESIGN.md`「已实测的 mem0 行为」。现行 hook matcher 已确认覆盖得住写入与删除类工具。
 
-**两项在实现前必须查清**，均记于 `DESIGN.md`「阻塞目标本身的未知」：mem0 的 `user_id` 如何确定（决定跨成员共享是否成立）、云端凭据如何分发给团队。
+**仍未确认的两项**，见 `DESIGN.md`「仍未确认的」：受管环境的 `allowManagedHooksOnly` 可能整体禁用本项目的 hook；凭据注入用的 `headersHelper` 尚未实测。
