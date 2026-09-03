@@ -428,6 +428,14 @@ function checkSymbols(entry, opts) {
   }
 
   for (const sym of symbols) {
+    // 预算必须在**花时间的那一层**检查，不能只在条目之间。
+    // 每个符号一次全仓检索、单次上限 opts.timeout；20 个符号最坏
+    // 20 × timeout，而注入前校验挂在每轮用户提示上——只在 verify 入口
+    // 查一次 deadline，等于声称了一个限不住的上界。
+    if (opts.deadline && Date.now() > opts.deadline) {
+      undetermined.push(`剩余符号未检索（超出总延迟预算 ${opts.budget}ms）`);
+      break;
+    }
     // 取最后一段标识符，容忍调用形态与泛型：
     //   ZzWidget.attachToList()  -> attachToList
     //   Foo::Bar<T>              -> Bar
@@ -436,7 +444,11 @@ function checkSymbols(entry, opts) {
       problems.push(`符号 ${JSON.stringify(sym)} 不含可检索的标识符`);
       continue;
     }
-    const r = repoHasIdentifier(ident, opts);
+    // 单次检索也不得超出剩余预算，否则一次 30 秒的检索就能吃掉整轮。
+    const budgeted = opts.deadline
+      ? { ...opts, timeout: Math.max(200, Math.min(opts.timeout, opts.deadline - Date.now())) }
+      : opts;
+    const r = repoHasIdentifier(ident, budgeted);
     if (r.undetermined) undetermined.push(`${sym}（${r.undetermined}）`);
     else if (!r.found) problems.push(`符号在仓库中查无踪迹：${sym}`);
   }

@@ -278,6 +278,19 @@ g('总延迟预算：注入前校验挂在每轮提示上，必须有上界');
 }
 ok(M.DEFAULT_BUDGET.symbols === 2000 && M.DEFAULT_BUDGET.full === 0,
   '注入路径默认 2 秒预算；full 不限（写入自检与人工审计不挂在提示上）');
+{
+  // 预算必须在花时间的那一层生效。只在 verify 入口查一次，等于声称了一个
+  // 限不住的上界：一条 20 符号的条目最坏是 20 × timeout。
+  const many = Array.from({ length: M.LIMITS.symbols }, (_, i) => `ZzSym${i}`);
+  const r = M.checkSymbols(entry({ symbols: many }), { ...fx, budget: 1, deadline: Date.now() - 1 });
+  ok(r.status === 'error' && /预算/.test(r.detail), '预算已耗尽时符号循环立即停止，判未验证而非失败', r.detail);
+}
+{
+  // 单次检索的超时也要被剩余预算压住，否则一次 30 秒检索吃掉整轮。
+  const t0 = Date.now();
+  M.checkSymbols(entry({ symbols: ['ZzDefinitelyAbsentQqq'] }), { ...fx, timeout: 30000, budget: 400, deadline: Date.now() + 400 });
+  ok(Date.now() - t0 < 3000, '单次检索不超出剩余预算太多', `实耗 ${Date.now() - t0}ms`);
+}
 
 // ---------------------------------------------------------------------------
 g('跨仓库：repo 字段不得成为可自选的免检开关');
