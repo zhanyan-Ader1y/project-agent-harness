@@ -568,7 +568,7 @@ project-agent-harness/
 
 # 前提假设与退路
 
-原有六条假设中的四条已于 **2026-09-03 对活端点实测**（`mcp.mem0.ai` server 版本 `1.29.1`，`api.mem0.ai/v3`），结论见下节。**剩余两条仍未实测**，其中假设 4 只服务于意图偏离检查，已随目标一移入 [`docs/deferred.md`](docs/deferred.md)；最小可用只剩一条：
+原有六条假设中的四条已于 **2026-09-03 对活端点实测**（`mcp.mem0.ai` server 版本 `1.29.1`，`api.mem0.ai/v3`），结论见下节。**假设 4（`type: "agent"` hook 可用）同日实测成立**——它只服务于意图偏离检查，随目标一移入 [`docs/deferred.md`](docs/deferred.md)。最小可用只剩一条未实测：
 
 | # | 假设 | 若不成立 | 退路 |
 | --- | --- | --- | --- |
