@@ -193,6 +193,26 @@ ok(cc({}).status === 'missing', '没有 evidence_cmd → missing');
 ok(cc({ evidence_cmd: '   ' }).status === 'missing', '空白 evidence_cmd 也是 missing');
 
 // ---------------------------------------------------------------------------
+g('mem0 往返后的 metadata 形状（2026-09-03 对活端点实测）');
+// mem0 的 metadata 是字符串键值模型：数字转字符串、单元素数组降级成标量、
+// 嵌套对象扁平化。从库里取回的条目不是写进去的那个形状，读取端必须容忍。
+ok(M.readDigest({ evidence_digest: { exit: 0, contains: ['ok'] } }).exit === 0, '手写的嵌套形状：exit 读得到');
+ok(M.readDigest({ evidence_exit: '0' }).exit === 0, '往返后 exit 是字符串 "0" → 转成数字 0');
+ok(JSON.stringify(M.readDigest({ evidence_contains: 'ok  ' }).contains) === '["ok  "]', '单元素数组降级成标量 → 读回数组');
+ok(JSON.stringify(M.readDigest({ evidence_contains: ['a', 'b'] }).contains) === '["a","b"]', '多元素数组原样');
+ok(M.readDigest({}).exit === undefined, '两种形状都没有 → exit 未声称（走默认期望 0）');
+ok(M.readDigest({ evidence_exit: '', evidence_digest: { exit: 3 } }).exit === 3, '扁平字段为空串时退回嵌套');
+{
+  // 若不转数字，"0" !== 0 会让每一条往返过的经验都判失败——
+  // 而它们全部会走淘汰。这条用例守的是那个。
+  const r = M.checkCommand(entry({
+    evidence_cmd: 'git rev-parse --is-inside-work-tree',
+    evidence_exit: '0', evidence_contains: 'true',
+  }), opts);
+  ok(r.status === 'pass', '完整的往返形状能正常判通过', r.detail);
+}
+
+// ---------------------------------------------------------------------------
 g('符号存在性（对着 fixture 仓库，不对着本仓库）');
 // 必须隔离：检查搜索整个 cwd，若对着本仓库测，本文件里写下的"编造符号"
 // 会被自己搜到——自指测量，用例恒不通过。

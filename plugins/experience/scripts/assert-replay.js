@@ -360,7 +360,7 @@ function checkCommand(entry, opts) {
   }
 
   const output = `${r.stdout || ''}${r.stderr || ''}`;
-  const want = md.evidence_digest && typeof md.evidence_digest === 'object' ? md.evidence_digest : {};
+  const want = readDigest(md);
   const wantExit = want.exit === undefined ? 0 : want.exit;
   const problems = [];
 
@@ -488,6 +488,36 @@ function repoHasIdentifier(ident, opts) {
 function toArray(v) {
   if (v === undefined || v === null) return [];
   return Array.isArray(v) ? v : [v];
+}
+
+/**
+ * 读取期望值，同时认两种形状——**因为 mem0 的 metadata 是字符串键值模型**，
+ * 实测（2026-09-03）往返后：数字变字符串、单元素数组降级成标量、
+ * 嵌套对象被扁平化成 `key.subkey` 形式的字符串数组。
+ *
+ *   手写条目：  evidence_digest: { exit: 0, contains: ["ok"] }
+ *   往返之后：  evidence_exit: "0", evidence_contains: "ok"（单元素已降级）
+ *
+ * 因此扁平字段优先（那是从库里取回的真实形状），退回嵌套（手写与本地测试）。
+ * 退出码统一转数字比较——`"0" !== 0` 会让每一条往返过的经验都判失败。
+ */
+function readDigest(md) {
+  const nested = md.evidence_digest && typeof md.evidence_digest === 'object' && !Array.isArray(md.evidence_digest)
+    ? md.evidence_digest : {};
+  // 空值等同于"没写"——字符串键值模型里空串就是没有值，此时退回嵌套形状。
+  const present = (v) => v !== undefined && v !== null && String(v).trim() !== '' && !(Array.isArray(v) && v.length === 0);
+  const pick = (flat, nest) => (present(flat) ? flat : nest);
+
+  const rawExit = pick(md.evidence_exit, nested.exit);
+  const out = {
+    contains: toArray(pick(md.evidence_contains, nested.contains)).map(String),
+    absent: toArray(pick(md.evidence_absent, nested.absent)).map(String),
+  };
+  if (present(rawExit)) {
+    const n = Number(rawExit);
+    if (Number.isFinite(n)) out.exit = n;
+  }
+  return out;
 }
 
 /**
@@ -673,7 +703,7 @@ if (require.main === module) {
 }
 
 module.exports = {
-  tokenize, normalizeFlags, escapesRepo, escapesRepoPhysically, vetCommand,
+  tokenize, normalizeFlags, escapesRepo, escapesRepoPhysically, vetCommand, readDigest,
   checkCommand, checkSymbols, repoHasIdentifier, belongsToRepo, verify,
   parseEntries, main, COMMAND_RULES, BACKENDS, LIMITS, MODES, DEFAULT_BUDGET,
 };

@@ -348,7 +348,10 @@ information:  一句话——什么做法导致什么错误
 metadata:
   repo, commit      发生时的代码状态
   evidence_cmd      能复现或证伪它的命令（由 assert-replay 实际重跑）
-  evidence_digest   { exit, contains[], absent[] }——可判定形式，不落输出原文
+  evidence_exit     声称的退出码，字符串（省略等于声称 "0"）
+  evidence_contains 输出必须包含的特征串        ┐ 摊平存放：mem0 的 metadata
+  evidence_absent   输出必须不含的特征串        ┘ 是字符串键值模型，嵌套对象
+                                                会被扁平化，不能原样往返
   files             仓库相对路径（绝对路径与 .. 一律拒绝）
   symbols           本条声称存在的标识符，如 ZzWidget.attachToList
                     —— 由 Review 层抽取；脚本无从猜测该查什么
@@ -364,7 +367,10 @@ metadata:
   high_cost_anchor  该信号对应的锚（逐字原话 / 退出码 / run id 等）
   recalled_n        被召回次数        ┐ 淘汰判据，
   adopted_n         被采纳次数        ┘ 由召回旁路回填
+  expiration_date   YYYY-MM-DD，到期后默认不再被检索到（见淘汰一节）
 ```
+
+**所有值只用字符串与多元素数组。** 数字会被转成字符串、单元素数组会降级成标量——读取端一律过 `toArray`，比较退出码前转数字。这不是洁癖：`"0" !== 0` 会让每一条往返过的经验判失败，而它们全部会走淘汰。
 
 `files` 与 `symbols` **各有数量上限**（初始各 20，超出即判失败）。每个符号一次全仓检索，而校验挂在每轮提示上——实测一条 300 符号的条目耗时 13.5 秒，不封顶就能拖垮每一轮。
 
@@ -404,6 +410,19 @@ metadata:
 第二条依赖采纳计数，而采纳计数依赖下面那个尚未解决的观测问题。
 
 **为什么不能自动**：自动淘汰 = 把 pass/fail 写回共享库 = 上面那条出向信道。人在回路里，判定就不再是命令退出码的确定性函数，问答节奏也不由攻击者掌握。**代价是淘汰不再实时**，库的膨胀速度取决于人多久跑一次审计。
+
+### `expiration_date`：一条不碰出向信道的自然退场
+
+mem0 的 `add` 支持 `expiration_date`（实测原样保留），到期后条目默认不再被检索到（`search` 的 `show_expired` 默认 false）。
+
+**它是写入时定的，不是判定的函数**——因此完全绕开上面那条信道，却仍然让库不会无限膨胀。
+
+它**不能**取代基于失效的淘汰：它不知道代码变了。两者分工——
+
+| | 管什么 |
+| --- | --- |
+| `expiration_date` | **没人再用的老经验自然退场**，自动、无需回写 |
+| 人工离线审计 | **已经失效的经验**（命令跑不通、符号没了），由人撤回 |
 
 ### 检索：`UserPromptSubmit`，带双上限
 
@@ -623,30 +642,92 @@ Dedup 层须单独测——参照数据显示它**对输入分布敏感、batch 
 
 # 前提假设与退路
 
-以下五条**按可用推进，均未实测**；假设一旦不成立，失效方式都是静默的。
+原有六条假设中的四条已于 **2026-09-03 对活端点实测**（`mcp.mem0.ai` server 版本 `1.29.1`，`api.mem0.ai/v3`），结论见下节。**剩余两条仍未实测**：
 
 | # | 假设 | 若不成立 | 退路 |
 | --- | --- | --- | --- |
-| 1 | REST `infer=False` 能让 `metadata` 原样保留 | `evidence_cmd` 失真，经验退化为不可证伪的说法 | 证据移出 mem0，另置只增不改的存储；mem0 只存指针 |
-| 2 | mem0 的自动 ADD/UPDATE/DELETE 不吃掉 `occurrences` 与 `status` | **甲分支整体失效**，「重复出现」无从判断 | 计数移出 mem0；或改为纯乙分支 |
-| 3 | `search_memories` 支持按 `status` 过滤 | **候选池全量涌进注入**——未审内容 + 无差别检索，最坏组合 | 候选与确认分两个 mem0 scope，检索只连确认那个 |
 | 4 | `type: "agent"` hook 可用（官方标 experimental） | 意图偏离检查没有强制形态 | 降级 `type: "prompt"` 挂 `Stop`，只提醒不 deny |
 | 5 | mem0 不可达时 hook 可静默降级而不阻断会话 | 网络抖动即阻断工作，或闸门与检索一起无声消失 | 检索失败静默跳过并在 transcript 留一行；**写入失败必须硬失败**，不得静默丢弃 |
-| 6 | 云端 mem0 的写入/删除工具名为 `add_memory` / `update_memory` / `delete_*` | **闸门 matcher 整条失效**（例如真实名称是复数的 `add_memories`），而 eval 抄了同一前提、照样 PASS | 凭据到位后立即跑 `tools/list`，把结果落成 fixture，matcher 与用例都对着 fixture |
 
-**假设 6 的现状**：工具名取自官方 hosted MCP 文档，**2026-09-02 对活端点做过一次未认证的 `tools/list`，返回 401**，无法确认。这是**凭据到位后的第一件事**，先于任何写入路径。
+# 已实测的 mem0 行为（2026-09-03）
 
-**假设 1、2、3 同源**——都取决于 mem0 写入与检索路径上那次 LLM 处理，**一次写入 + 一次检索可同时证伪**。三条都塌的话，mem0 退化为纯指针存储，证据另置。
+**这一节是事实，不是假设。** 每条都由一次真实调用得出。
 
-# 阻塞目标本身的未知
+## `infer: false` 跳过整合，不只是跳过抽取
 
-**`user_id` 如何确定**，官方 MCP 文档未说明。这不是推广节奏问题：
+连写三条语义高度相似的经验（"stop hook 不能同步上报"的三种说法），**三条全部 `event=ADD`，三条都在库里，`replaced_by=null`、`synthesized=false`**。带不带 `immutable` 结果相同。
 
-- 若按 `user_id` 隔离且每人一个 → **跨成员重复检测与团队共享同时不成立**，目标三失去大半
-- 若共用一个 → `author` 是纯自填字段，归属不可信
+原先担心的"自动 ADD/UPDATE/DELETE 会吃掉 `occurrences` 与 `status`"**不成立**，因此：
 
-**必须在实现前查清。**
+- **`occurrences` / `status` 安全**，甲分支成立
+- **不需要 `immutable`**——一度打算给所有 `confirmed` 加上，是多余的
+
+## metadata 是字符串键值模型，不是 JSON
+
+`infer: false` 确实生效（记忆正文原样未被抽取改写），但 metadata 的**序列化**会改形状：
+
+| 写入 | 取回 |
+| --- | --- |
+| 含引号、反斜杠、换行、中文、shell 元字符的字符串 | **逐字节原样** |
+| 多元素数组 `['a','b']` | 原样 |
+| 数字 `2` | 字符串 `"2"` |
+| 单元素数组 `['x']` | 降级成标量 `"x"` |
+| 嵌套对象 `{exit:0,contains:[...]}` | 扁平化成 `["exit.0","contains.…"]` |
+
+**这不是改写，是存储模型。** 最要紧的一条安全：`evidence_cmd` 原样往返，重跑成立。
+
+**因此 schema 只用字符串与多元素数组**，`evidence_digest` 摊平为 `evidence_exit` / `evidence_contains` / `evidence_absent`；读取端一律过 `toArray` 并把退出码转数字——**否则 `"0" !== 0` 会让每一条往返过的经验都判失败，而它们全部会走淘汰。**
+
+## 检索能按自定义 metadata 过滤
+
+`filters: {AND:[{user_id: …}, {metadata:{status:'confirmed'}}]}` 精确命中；`status:'candidate'` 返回 0 条。候选与确认可以同库共存，无需分两个 scope。
+
+`search_memories` 还有 `top_k` / `threshold` / `rerank`——**注入的条数上限可以在服务端截断**，不必取回来再扔；`rerank` 加 150–200ms，要计进 2,000ms 预算。
+
+## 工具名与写入路径
+
+`tools/list` 实得 **11 个工具**，写入与删除类为 `add_memory` / `update_memory` / `delete_memory` / `delete_all_memories` / `delete_entities`——**现行 matcher 覆盖得住**。
+
+`add_memory` 的参数是 `text, messages, user_id, agent_id, app_id, run_id, metadata, infer`——**MCP 直接暴露了 `infer` 与 `metadata`**，先前"MCP 不暴露 infer，所以写入必须走 REST"这个理由不成立。
+
+**但写入仍然走脚本走 REST**，理由换成三条实的：`add_memory` **没有 `expiration_date`**（淘汰要用）；查库必须不可跳过；红线过滤与硬失败要有地方落。
+
+## `user_id` 是显式参数——那条"阻塞目标本身的未知"撤销
+
+至少要传一个 entity ID（`user_id` / `agent_id` / `app_id` / `run_id`）。**团队共享就是大家传同一个 `user_id`。**
+
+代价不变且已知：共用一个 scope，mem0 侧没有作者归属，`author` 只能自带且不可信。
+
+## 其它数字与字段
+
+- **异步索引延迟约 725 ms**（写入到可查）——甲分支"查库→没查到→写候选"的竞态窗口就是这个量级，候选归并必须考虑
+- **`expiration_date` 原样保留**，配合 search 的 `show_expired`（默认 false）
+- 条目上还有四个我们没设计过的字段：`categories`、`structured_attributes`、`replaced_by`、`synthesized`。**`replaced_by` 值得留意**——它意味着整合真的发生时是可观测的
+
+# 仍未确认的
 
 **受管环境的 `allowManagedHooksOnly`** 可能整体禁用本项目的 hook，闸门静默失效——团队推广前须确认。
 
-**凭据分发未定**：`.mcp.json` 里的 OAuth / API key 如何发到团队每个人手上、放在哪，是推广的硬前置，尚无方案。
+**`headersHelper` 的实际行为**——凭据注入依赖它，尚未实测。
+
+## 凭据
+
+**`.mcp.json` 里不放任何凭据**，默认走 OAuth 浏览器登录：
+
+```json
+{ "mcpServers": { "mem0": { "type": "http", "url": "https://mcp.mem0.ai/mcp" } } }
+```
+
+需要用 API key 的场景（CI、无浏览器），用官方的 **`headersHelper`** 指向一个脚本，由脚本从环境变量或密钥库吐出 header：
+
+```json
+"headersHelper": "${CLAUDE_PLUGIN_ROOT}/scripts/auth-headers.sh"
+```
+
+**不得使用静态 `headers` 字段**——那等于把 key 提交进版本库。
+
+## 只能有一个 mem0 MCP 来源
+
+mem0 官方也发布了自己的 Claude Code 插件，它**自带 MCP server**。若与本插件并存，agent 会同时看到两组 mem0 工具，而**它那组的工具名前缀不同（`mcp__plugin_<它的名字>_<server>__*`），本项目的 deny hook 匹配不到**。
+
+**两套并存是最坏的选择**：一组有闸门，一组没有，而 agent 不区分。要么只用本插件的 `.mcp.json`（现行选择），要么改用它的并把 matcher 换成它的前缀。
