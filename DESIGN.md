@@ -618,11 +618,15 @@ project-agent-harness/
 
 ## eval 套件
 
-- **谁跑**：`node evals/run-all.js`
+- **谁跑**：本地 `node evals/run-all.js`；CI 由 `.github/workflows/evals.yml` 在 `plugins/**`、`.claude-plugin/**`、`evals/**` 任一变更时触发
 - **阈值**：冒烟集必须 **100%** 通过，方可合入
 - **不达标怎样**：拒绝合入该变更
 
-三问全在，一条不少。**移出的只有 CI 自动触发这一个执行形态**（`.github/workflows/evals.yml`，本仓库尚无远端、该工作流从未实际运行过），见 [`docs/deferred.md`](docs/deferred.md)——一个从未运行过的 workflow 声称自己是门禁，正是本项目最怕的那种"写下来就算有了"。
+**CI 自动触发这一形态已于 2026-09-04 从 [`docs/deferred.md`](docs/deferred.md) 拿回**——它当初移出的唯一理由是"依赖一个不存在的远端"，而远端已经有了（`git push` 首推，run 33826467231，`windows-latest` 与 `ubuntu-latest` 两条 matrix 均通过）。**在那一刻之前，这个 workflow 声称自己是门禁却一次也没跑过**，正是本项目最怕的那种"写下来就算有了"。
+
+**matrix 跑两个 OS，不是求全**：已知的静默失效点几乎都是 Windows 特有的（MSYS coreutils 自行展开 `~` 与 glob、`echo '单引号 JSON'` 在 `cmd.exe` 下解析失败）。只跑 ubuntu 等于那些用例在门禁里一次也不执行。
+
+**首次运行就量出一个缺口并已修**：`windows-latest` **不自带 `rg`**，于是 rg 的两条断言在 Windows 上静默 skip（416 项 vs 本地 418 项）——**维护者实际用的配置（Windows + rg）在门禁里一次也没跑过**。现在两个 runner 都装 rg。这也说明"绿了"本身不是判据，得看跑了多少条。
 
 **冷启动不等真实任务**——第一批种子直接取自本文档已识别的静默失效模式，今天就能写：
 

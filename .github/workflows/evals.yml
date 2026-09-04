@@ -1,7 +1,9 @@
 # DESIGN.md 的 eval 门禁：skills/ hooks/ scripts/ 任一变更即跑，
 # 冒烟集必须 100% 通过才可合入。
 #
-# 注意：本仓库尚无远端，**此工作流从未实际运行过**。
+# **首次实际运行：2026-09-04**（run 33826467231，两条 matrix 均通过）。
+# 在那之前本仓库没有远端，这个文件声称自己是门禁却一次也没跑过——正是
+# 本项目最怕的"写下来就算有了"。
 name: evals
 
 on:
@@ -31,9 +33,15 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+      # 符号检查在 rg 与 grep 之间回退，用例对两个后端各断言一遍。
+      # **两个 runner 都要装**：首次运行实测 windows-latest **不自带 rg**，
+      # 于是 rg 那两条断言在 Windows 上静默 skip（416 项 vs 本地 418 项）。
+      # 结果是维护者实际用的配置（Windows + rg）在门禁里一次也没跑过。
       - name: 安装 ripgrep（Linux）
-        # 符号检查在 rg 与 grep 之间回退，用例对两个后端各断言一遍。
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y ripgrep
+      - name: 安装 ripgrep（Windows）
+        if: runner.os == 'Windows'
+        run: choco install ripgrep -y --no-progress
       - name: 跑全部 eval
         run: node evals/run-all.js
