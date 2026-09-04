@@ -414,7 +414,7 @@ mem0 的 `add` 支持 `expiration_date`（实测原样保留），到期后条�
 
 留在最小可用里的两个是**写入前自检**（`--mode full`，作者自己机器上跑自己写的命令）与**注入前校验**（`--mode symbols`，不执行任何命令）。
 
-`assert-replay` 的实现（`plugins/experience/scripts/assert-replay.js`，765 行）与它的 280 项回归用例**全部留在仓库里**，包括 `--mode full` 那一半与五道执行边界——推后的是**两个调用点**，不是代码。
+`assert-replay` 的实现（`plugins/experience/scripts/assert-replay.js`，898 行）与它的 320 项回归用例**全部留在仓库里**，包括 `--mode full` 那一半与五道执行边界——推后的是**两个调用点**，不是代码。
 
 条目结构里的三个字段——`recalled_n`、`adopted_n`、`expiration_date`——**定义在 `DESIGN.md` 的「条目结构」一节，不在这里复述**；此处只记它们的**消费方**被推后，字段本身留在 schema 中不动。
 

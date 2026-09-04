@@ -16,6 +16,7 @@
 //     --timeout <ms>    单条命令/检索超时（默认 30000）
 //     --budget <ms>     整轮总延迟上限，超出即停止并把剩余条目判为未验证
 //                       （symbols 模式默认 2000；full 模式默认不限）
+//                       符号检索整轮只扫一遍仓库，见 prescanSymbols
 //     --allow <a,b,c>   追加允许执行的程序；追加的程序**不允许携带任何选项**
 //     --backend <name>  强制符号检索后端（rg | grep），默认按可用性回退
 //     --quiet           只输出 JSON，不输出人类可读摘要
@@ -407,8 +408,8 @@ function checkSymbols(entry, opts) {
   if (files.length === 0 && symbols.length === 0) {
     return { kind: 'symbol', status: 'missing', detail: '条目没有 files 也没有 symbols' };
   }
-  // 每个符号一次全仓检索，而本检查挂在每轮提示上：一条 300 符号的条目
-  // 实测耗时 13.5 秒。数量必须封顶，否则共享库里的条目能拖垮每一轮。
+  // 上限防的是单条条目失控——实测一条 300 符号的条目耗时 13.5 秒。
+  // 整轮延迟不靠这个上限控，靠 prescanSymbols 的批量检索。
   if (files.length > LIMITS.files || symbols.length > LIMITS.symbols) {
     return {
       kind: 'symbol',
@@ -434,21 +435,32 @@ function checkSymbols(entry, opts) {
   }
 
   for (const sym of symbols) {
-    // 预算必须在**花时间的那一层**检查，不能只在条目之间。
-    // 每个符号一次全仓检索、单次上限 opts.timeout；20 个符号最坏
-    // 20 × timeout，而注入前校验挂在每轮用户提示上——只在 verify 入口
-    // 查一次 deadline，等于声称了一个限不住的上界。
+    const ident = identOf(sym);
+    if (!ident) {
+      problems.push(`符号 ${JSON.stringify(sym)} 不含可检索的标识符`);
+      continue;
+    }
+
+    // 首选整轮一次的批量检索结果（见 prescanSymbols）。
+    if (opts._symbolScan) {
+      if (!opts._symbolScan.has(ident)) problems.push(`符号在仓库中查无踪迹：${sym}`);
+      continue;
+    }
+    // 批量整批失败时不再逐个去撞同一堵墙——没有后端就是没有后端，
+    // 100 次注定 ENOENT 的 spawn 只是把"查不动"这个结论拖慢。
+    if (opts._symbolScanFailed) {
+      undetermined.push(`${sym}（${opts._symbolScanFailed}）`);
+      continue;
+    }
+
+    // 退路：逐个查。批量未跑过（直接调用本函数）时走这里，结论与批量一致。
+    // 预算必须在**花时间的那一层**检查，不能只在条目之间：每个符号一次
+    // 全仓检索、单次上限 opts.timeout，20 个符号最坏 20 × timeout，而注入
+    // 前校验挂在每轮用户提示上——只在 verify 入口查一次 deadline，等于声称
+    // 了一个限不住的上界。
     if (opts.deadline && Date.now() > opts.deadline) {
       undetermined.push(`剩余符号未检索（超出总延迟预算 ${opts.budget}ms）`);
       break;
-    }
-    // 取最后一段标识符，容忍调用形态与泛型：
-    //   ZzWidget.attachToList()  -> attachToList
-    //   Foo::Bar<T>              -> Bar
-    const ident = String(sym).replace(/\(.*$/, '').replace(/<.*$/, '').split(/[.#:]/).filter(Boolean).pop();
-    if (!ident || !/^[A-Za-z_$][\w$]*$/.test(ident)) {
-      problems.push(`符号 ${JSON.stringify(sym)} 不含可检索的标识符`);
-      continue;
     }
     // 单次检索也不得超出剩余预算，否则一次 30 秒的检索就能吃掉整轮。
     const budgeted = opts.deadline
@@ -468,6 +480,17 @@ function checkSymbols(entry, opts) {
   return { kind: 'symbol', status: 'pass', detail: `${files.length} 个文件、${symbols.length} 个符号均存在` };
 }
 
+/**
+ * 取最后一段标识符，容忍调用形态与泛型：
+ *   ZzWidget.attachToList()  -> attachToList
+ *   Foo::Bar<T>              -> Bar
+ * @returns {string|null} null = 不含可检索的标识符
+ */
+function identOf(sym) {
+  const ident = String(sym).replace(/\(.*$/, '').replace(/<.*$/, '').split(/[.#:]/).filter(Boolean).pop();
+  return ident && /^[A-Za-z_$][\w$]*$/.test(ident) ? ident : null;
+}
+
 const BACKENDS = {
   // rg 默认尊重 .gitignore、跳过隐藏目录与二进制；grep -r 全都搜。
   // 若不统一，同一条经验在装了 rg 和没装 rg 的机器上会得到相反结论。
@@ -476,6 +499,111 @@ const BACKENDS = {
     '--fixed-strings', '--word-regexp', '--quiet', '--', ident, '.']],
   grep: (ident) => ['grep', ['-r', '-I', '-s', '-F', '-w', '-q', '--exclude-dir=.git', '--', ident, '.']],
 };
+
+/**
+ * 批量形态：与 BACKENDS 搜同一批文件、同一套匹配语义，只是一次带多个 pattern，
+ * 并把 `--quiet` 换成 `-o`（只输出匹配串本身）。`-F -w` 下匹配串恒等于 pattern，
+ * 因此去重后的输出就是"命中了哪些符号"，未出现的即不存在——逐符号的判定不丢。
+ *
+ * **不用 --max-count 压输出量**：它是每文件的总匹配上限，跨 pattern 生效。
+ * 一个被 A 刷屏的文件会把只在该文件出现的 B 挤掉，B 于是被误判为不存在——
+ * 那正是"把一条正确经验判死"的组合。宁可靠 maxBuffer 兜底后退回逐个查。
+ */
+const BATCH_BACKENDS = {
+  rg: (idents) => ['rg', ['--no-ignore', '--hidden', '--glob', '!.git/**',
+    '--fixed-strings', '--word-regexp', '--only-matching', '--no-filename', '--no-line-number',
+    ...idents.flatMap((s) => ['-e', s]), '--', '.']],
+  grep: (idents) => ['grep', ['-r', '-I', '-s', '-F', '-w', '-o', '-h', '--exclude-dir=.git',
+    ...idents.flatMap((s) => ['-e', s]), '--', '.']],
+};
+
+// 分块只为躲命令行长度上限，不为性能——批量的收益来自"少扫几遍仓库"，
+// 200 个 pattern 一次已经把 100 个符号的常见规模收进单次调用。
+const BATCH_SIZE = 200;
+// 输出是全部匹配串。特定到具体符号的标识符不会刷屏，但 symbols 里写一个
+// 极常见的词（如 get）就会。超出即判定失败并退回逐个查，不静默截断。
+const BATCH_MAX_BUFFER = 32 * 1024 * 1024;
+
+/** @returns {{found: Set<string>} | {undetermined: string}} */
+function repoHasIdentifiers(idents, opts) {
+  const names = opts.backend ? [opts.backend] : ['rg', 'grep'];
+  const notes = [];
+  for (const name of names) {
+    const make = BATCH_BACKENDS[name];
+    if (!make) return { undetermined: `未知后端 ${name}` };
+
+    const found = new Set();
+    let failed = null;
+    for (let i = 0; i < idents.length; i += BATCH_SIZE) {
+      const t = opts.deadline
+        ? Math.max(200, Math.min(opts.timeout, opts.deadline - Date.now()))
+        : opts.timeout;
+      const [prog, args] = make(idents.slice(i, i + BATCH_SIZE));
+      const r = spawnSync(prog, args, {
+        cwd: opts.cwd, timeout: t, shell: false, windowsHide: true,
+        encoding: 'utf8', maxBuffer: BATCH_MAX_BUFFER,
+      });
+      if (r.error) {
+        // 只有"这个工具不在"才换下一个后端；其余（超时、缓冲溢出）如实上报。
+        if (r.error.code === 'ENOENT') { notes.push(`${prog} 未安装`); failed = '__next__'; break; }
+        failed = `${prog}: ${r.error.code || r.error.message}`;
+        break;
+      }
+      // 0 = 有匹配、1 = 无匹配，两者都是正常结论；≥2 才是出错。
+      if (r.status !== 0 && r.status !== 1) {
+        failed = `${prog} 退出码 ${r.status}：${(r.stderr || '').trim().slice(0, 120)}`;
+        break;
+      }
+      for (const line of String(r.stdout).split('\n')) {
+        const s = line.trim();
+        if (s) found.add(s);
+      }
+    }
+    if (failed === '__next__') continue;
+    if (failed) return { undetermined: failed };
+    return { found };
+  }
+  return { undetermined: notes.join('、') || '没有可用的检索后端' };
+}
+
+/**
+ * 整轮一次的符号检索。**成本几乎全在"扫一遍仓库"这个固定开销上，不在符号
+ * 数量上**——一次调用带 100 个 pattern 与带 1 个 pattern 扫的是同一遍。
+ *
+ * 实测（Themis 仓库，405 个跟踪文件 / 18 MB，ripgrep 15.1.0），100 个符号：
+ *   rg    逐个 6,404 ms → 批量 122 ms
+ *   grep  逐个 16,843 ms → 批量 205 ms
+ *
+ * 2,000 ms 的注入前预算原先靠"不出机器的本地缓存"来平，而缓存已明确不做
+ * （2026-09-04）。**这里存的是一次批量检索的结果分发，不是跨轮缓存**：它挂在
+ * opts 上、随进程结束消失，下一轮提示重新扫。
+ *
+ * 失败不影响正确性，只影响速度与可判定性：拿不到批量结果时 checkSymbols
+ * 退回逐个查（本函数没跑过）或整体判为查不动（本函数跑了但失败）。
+ */
+function prescanSymbols(entries, opts) {
+  const idents = new Set();
+  for (const e of entries) {
+    if (!e || typeof e !== 'object' || Array.isArray(e)) continue;
+    const md = e.metadata;
+    if (md === null || typeof md !== 'object' || Array.isArray(md)) continue;
+    const syms = toArray(md.symbols);
+    // 超上限的条目会先被判失败，不必为它扫。
+    if (syms.length === 0 || syms.length > LIMITS.symbols) continue;
+    for (const s of syms) {
+      const i = identOf(s);
+      if (i) idents.add(i);
+    }
+  }
+  if (idents.size === 0) { opts._symbolScan = new Set(); return; }
+  if (opts.deadline && Date.now() > opts.deadline) {
+    opts._symbolScanFailed = `超出总延迟预算（${opts.budget}ms），未做符号检索`;
+    return;
+  }
+  const r = repoHasIdentifiers([...idents], opts);
+  if (r.undetermined) opts._symbolScanFailed = r.undetermined;
+  else opts._symbolScan = r.found;
+}
 
 /** @returns {{found: boolean} | {undetermined: string}} */
 function repoHasIdentifier(ident, opts) {
@@ -739,6 +867,9 @@ function main(argv) {
     return 2;
   }
 
+  // 符号检索整轮一次，在逐条校验之前。预算是整轮的，这一步也吃预算。
+  prescanSymbols(entries, opts);
+
   const results = entries.map((e) => verify(e, opts));
   process.stdout.write(JSON.stringify(results, null, 2) + '\n');
 
@@ -760,6 +891,8 @@ if (require.main === module) {
 
 module.exports = {
   tokenize, normalizeFlags, escapesRepo, escapesRepoPhysically, vetCommand, readDigest,
-  checkCommand, checkSymbols, repoHasIdentifier, belongsToRepo, verify,
-  parseEntries, main, COMMAND_RULES, BACKENDS, LIMITS, MODES, DEFAULT_BUDGET,
+  checkCommand, checkSymbols, repoHasIdentifier, repoHasIdentifiers, prescanSymbols,
+  identOf, belongsToRepo, verify,
+  parseEntries, main, COMMAND_RULES, BACKENDS, BATCH_BACKENDS, BATCH_SIZE,
+  LIMITS, MODES, DEFAULT_BUDGET,
 };

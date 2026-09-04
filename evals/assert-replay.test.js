@@ -347,6 +347,93 @@ g('跨仓库：repo 字段不得成为可自选的免检开关');
 ok(M.verify(entry({ repo: { x: 1 }, evidence_cmd: 'git status' }), opts).verdict === 'fail', 'repo 不是字符串 → fail，不是 skipped');
 
 // ---------------------------------------------------------------------------
+g('批量符号检索：整轮一次，且不得改变任何判定');
+// 2,000ms 的注入前预算原先靠"不出机器的本地缓存"来平，而缓存已明确不做
+// （2026-09-04），改由整轮一次的批量检索来平。
+// **批量是性能改动，判定必须逐符号等价**——一旦批量与逐个给出不同结论，
+// 共享库里同一条经验在两台机器上的命运就不同，而两边都不会报错。
+{
+  const probes = ['ZzWidget', 'attachToList', 'zzBundledOnlySymbol', 'zzDefinitelyAbsentQqq', 'ZzNoSuchThingQq'];
+  for (const backend of ['rg', 'grep']) {
+    const o = { ...fx, backend };
+    const batch = M.repoHasIdentifiers(probes, o);
+    if (batch.undetermined && /未安装|没有可用/.test(batch.undetermined)) {
+      console.log(`  skip  ${backend} 不可用`);
+      continue;
+    }
+    ok(!batch.undetermined, `${backend}：批量检索给出了结论`, batch.undetermined);
+    if (batch.undetermined) continue;
+    // zzBundledOnlySymbol 只在被 .gitignore 忽略的 dist/ 里——批量必须沿用
+    // 与逐个查同一套语义（搜全部工作树文件），否则 rg/grep 的统一在批量路径上失效。
+    const diffs = probes.filter((p) => M.repoHasIdentifier(p, o).found !== batch.found.has(p));
+    ok(diffs.length === 0, `${backend}：${probes.length} 个符号逐个查与批量查逐一同结论`, diffs.join('、'));
+    ok([...batch.found].every((s) => probes.includes(s)),
+      `${backend}：结果里不含未请求的符号（-F -w 下匹配串恒等于 pattern）`, [...batch.found].join('、'));
+  }
+}
+{
+  // 对照：批量的收益全在"少扫几遍仓库"。没有这条，改动可能一无所获而无人察觉。
+  const many = Array.from({ length: 40 }, (_, i) => `ZzProbe${i}`);
+  const t0 = Date.now();
+  for (const s of many) M.repoHasIdentifier(s, fx);
+  const serial = Date.now() - t0;
+  const t1 = Date.now();
+  const r = M.repoHasIdentifiers(many, fx);
+  const batched = Date.now() - t1;
+  if (r.undetermined) console.log(`  skip  没有可用后端：${r.undetermined}`);
+  else ok(batched * 3 < serial, '40 个符号：批量明显快于逐个（阈值 3 倍，实测约 40 倍）',
+    `批量 ${batched}ms / 逐个 ${serial}ms`);
+}
+
+g('prescanSymbols：结果分发、失败降级、预算');
+{
+  const entries = [
+    entry({ symbols: ['ZzWidget.attachToList()'] }, 'real'),
+    entry({ symbols: ['zzBundledOnlySymbol', 'ZzFabricatedQq'] }, 'fake'),
+  ];
+  const o = { ...fx, mode: 'symbols' };
+  M.prescanSymbols(entries, o);
+  if (o._symbolScanFailed) {
+    console.log(`  skip  没有可用后端：${o._symbolScanFailed}`);
+  } else {
+    ok(o._symbolScan instanceof Set, 'prescan 产出一次批量检索的结果集');
+    const a = M.verify(entries[0], o);
+    const b = M.verify(entries[1], o);
+    ok(a.verdict === 'pass' && a.verified === true,
+      '存在的符号 → pass 且 verified', JSON.stringify(a.checks[1]));
+    ok(b.verdict === 'fail' && b.verified === true && /ZzFabricatedQq/.test(b.checks[1].detail),
+      '编造的符号 → fail 且 verified（这正是唯一可据以淘汰的组合）', JSON.stringify(b.checks[1]));
+  }
+}
+{
+  // 超上限的条目不进批量——不为一条注定被上限判失败的条目去扫全仓；
+  // 但上限判定本身必须照旧生效，不能因为"没扫"就变成通过。
+  const over = entry({ symbols: Array.from({ length: M.LIMITS.symbols + 1 }, (_, i) => `ZzOver${i}`) });
+  const o = { ...fx, mode: 'symbols' };
+  M.prescanSymbols([over], o);
+  ok(o._symbolScan && o._symbolScan.size === 0, '超上限的条目不被扫');
+  ok(M.checkSymbols(over, o).status === 'fail', '超上限仍判失败', M.checkSymbols(over, o).detail);
+}
+{
+  // 批量整批失败 → "查不动"，不是"不存在"。两者混流的后果是：一台没装 rg
+  // 也没装 grep 的机器跑一次审计，会把全库带 symbols 的条目一并判失败。
+  const o = { ...fx, mode: 'symbols', backend: 'zz-no-such-backend' };
+  const e = entry({ symbols: ['ZzWidget'] });
+  M.prescanSymbols([e], o);
+  ok(!!o._symbolScanFailed, '后端不可用 → prescan 失败并留下原因', o._symbolScanFailed);
+  const r = M.verify(e, o);
+  ok(r.verified === false && r.checks[1].status === 'error',
+    '批量失败 → verified:false，判 error 而非 fail', JSON.stringify(r.checks[1]));
+}
+{
+  // prescan 也吃整轮预算。预算耗尽时它不该再去扫，且必须如实说明是预算问题
+  // ——说成"符号不存在"就是把没验证的说成验证过的镜像错误。
+  const o = { ...fx, mode: 'symbols', budget: 1, deadline: Date.now() - 1 };
+  M.prescanSymbols([entry({ symbols: ['ZzWidget'] })], o);
+  ok(/预算/.test(o._symbolScanFailed || ''), 'prescan 超预算时不扫，并说明原因', o._symbolScanFailed);
+}
+
+// ---------------------------------------------------------------------------
 g('无法判定必须与断言为假区分开');
 {
   // 没有可用后端时，符号检查是"查不动"而不是"不存在"。若两者合流，
@@ -410,6 +497,16 @@ const cli = (args, stdin) => {
   const r = cli(['-', '--quiet', '--mode', 'full'], JSON.stringify({ id: 'a', metadata: { evidence_cmd: 'git rev-parse --is-inside-work-tree' } }));
   ok(r.code === 0, '全部通过 → 退出码 0', `code=${r.code}`);
   ok(JSON.parse(r.out)[0].verdict === 'pass', 'stdout 是可解析的 JSON');
+}
+{
+  // CLI 是唯一真的走 prescanSymbols 的入口（main 里调）。上面那组直接调
+  // 内部函数，测不到"批量有没有被接进主路径"这件事。
+  const two = [entry({ symbols: ['ZzWidget'] }, 'real'), entry({ symbols: ['ZzFabricatedQq'] }, 'fake')];
+  const r = cli(['-', '--quiet', '--cwd', FIXTURE], JSON.stringify(two));
+  const out = JSON.parse(r.out);
+  ok(out[0].verdict === 'pass' && out[1].verdict === 'fail',
+    'CLI 走批量后判定不变', `${out[0].verdict}/${out[1].verdict}`);
+  ok(out[0].verified === true && out[1].verified === true, 'CLI 走批量后两条都算判定过');
 }
 {
   // 不传 --mode 时必须是 symbols：粗心的调用方默认拿到不执行命令的那一半
