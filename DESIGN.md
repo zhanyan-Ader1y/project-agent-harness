@@ -626,7 +626,9 @@ project-agent-harness/
 
 **matrix 跑两个 OS，不是求全**：已知的静默失效点几乎都是 Windows 特有的（MSYS coreutils 自行展开 `~` 与 glob、`echo '单引号 JSON'` 在 `cmd.exe` 下解析失败）。只跑 ubuntu 等于那些用例在门禁里一次也不执行。
 
-**首次运行就量出一个缺口并已修**：`windows-latest` **不自带 `rg`**，于是 rg 的两条断言在 Windows 上静默 skip（416 项 vs 本地 418 项）——**维护者实际用的配置（Windows + rg）在门禁里一次也没跑过**。现在两个 runner 都装 rg。这也说明"绿了"本身不是判据，得看跑了多少条。
+**首次运行就量出一个缺口并已修**：`windows-latest` **不自带 `rg`**，于是 rg 的两条断言在 Windows 上静默 skip（416 项 vs 本地 418 项）——**维护者实际用的配置（Windows + rg）在门禁里一次也没跑过**。现在两个 runner 都装 rg。这也说明**"绿了"本身不是判据，得看跑了多少条**。
+
+修完之后两条 matrix 的实测数（run 33826655443）：**`windows-latest` 418 项、0 skip；`ubuntu-latest` 413 项、0 skip**。差的 5 项全部是 `cmd.exe` 特有的断言（`shells` 在 Windows 上是 `['sh','cmd']`、Linux 上只有 `['sh']`，加上那两条 `echo '单引号 JSON'` 的反向对照）——**Linux 上没有 `cmd`，这 5 项本就不该跑**。差额记在这里，免得下次有人看到 413 以为又静默跳过了什么。
 
 **冷启动不等真实任务**——第一批种子直接取自本文档已识别的静默失效模式，今天就能写：
 
