@@ -6,16 +6,26 @@
 
 ## 组成
 
-| 路径 | 状态 |
+| 路径 | 做什么 |
 | --- | --- |
-| `.mcp.json` | ✅ 云端 mem0（`https://mcp.mem0.ai/mcp`，HTTP，OAuth） |
-| `hooks/hooks.json` | ✅ 一条：deny 裸调用 mem0 的写入与删除工具 |
-| `scripts/assert-replay.js` | ✅ 重跑断言 + 符号存在性校验 |
-| `scripts/selfcheck.js` | ✅ **装好之后先跑它**，见下 |
-| `skills/experience-intake/` | ⬜ 未建 |
-| `scripts/experience-write` | ⬜ 未建 |
+| `.mcp.json` | 云端 mem0（`https://mcp.mem0.ai/mcp`，HTTP，OAuth），供 agent 做临时检索 |
+| `hooks/hooks.json` | 两条，**失败方向相反**，见下 |
+| `hooks/recall.js` | 每轮提示按内容检索经验，**注入前逐条校验**，带双上限 |
+| `hooks/deny.js` | 拒绝裸调用 mem0 的写入与删除工具 |
+| `skills/experience-intake/` | 判"值不值得记"——三镜头、九类垃圾、乙分支的信号与锚 |
+| `scripts/experience-write.js` | 入库的唯一通道：形状 → 红线 → 自检 → 查库 → 分支 → 写入 |
+| `scripts/assert-replay.js` | 重跑断言 + 符号存在性校验，上面两条都靠它 |
+| `scripts/mem0.js` | REST 客户端，写入与检索共用一份契约 |
+| `scripts/selfcheck.js` | **装好之后先跑它**，见下 |
 
-**未建的部分刻意不留空壳。** 一个带 description 却没有正文的 skill 会被模型加载并给出空指引；一个静默退出的脚本会让"写入失败必须硬失败"这条约束落空。空目录比空契约安全。
+**两条 hook 的失败方向是相反的，改动前先看清楚：**
+
+| hook | 解释器缺失时 | 为什么 |
+| --- | --- | --- |
+| `deny`（`PreToolUse`） | **失败关闭**（`\|\| exit 2`） | 放行就等于绕过写入脚本的全部把关 |
+| `recall`（`UserPromptSubmit`） | **失败开放** | 这里非 0 退出码会挡住用户这一轮提问；**取不到经验绝不能是"不许提问"** |
+
+**把 `recall` 照抄成 `\|\| exit 2` 就是把它改坏。** 有用例守着这一条。
 
 ## 配置：两个值由你的项目自己定
 
@@ -47,7 +57,13 @@ node plugins/experience/scripts/selfcheck.js --cwd <你的仓库> --mem0   # 需
 
 ## 已生效的行为
 
-**闸门**：`PreToolUse` 拦下 `add_memory` / `update_memory` / `delete*`，一律拒绝并给出理由。**这在写入脚本落地之前就是正确行为**——写入必须走脚本，脚本还不存在，所以现在什么都不该写进去。检索类工具（`search_memories` / `get_memories` / …）不受影响。
+**闸门**：`PreToolUse` 拦下 `add_memory` / `update_memory` / `delete*`，一律拒绝并给出理由。写入只能走 `experience-write.js`，因为**查库、红线过滤与硬失败都落在那里**——绕过它，"必须撞上第二次才进检索"这条规则就没有执行者了。检索类工具（`search_memories` / `get_memories` / …）不受影响。
+
+**检索**：`UserPromptSubmit` 每轮按提示内容检索 `status: confirmed` 的经验，**逐条跑 `assert-replay --mode symbols` 之后才注入**——`verdict` 不是 `pass`、或 `verified` 不是 `true` 的一律不注入。时间账：检索 ≤ 1,500 ms + 校验 ≤ 2,000 ms，最坏约 3,500 ms/轮。注入上限 5 条 / 1,500 tokens。
+
+**"取回后请先跑 `evidence_cmd` 再采信"是一条没有执行者的要求**，所以校验做成了注入前的机器动作，agent 想跳过也跳不掉。
+
+**写入**：`experience-write.js` 是唯一通道。它会真的执行你写的 `evidence_cmd`（`--mode full`，在你自己机器上跑你自己写的命令），真的查库，写失败就硬失败——**退出码非 0 表示库里什么都没多**。先用 `--dry-run` 看它会写什么。
 
 **`assert-replay.js`**：可独立使用，不依赖 mem0。
 

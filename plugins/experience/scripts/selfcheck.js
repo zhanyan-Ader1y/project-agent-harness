@@ -139,16 +139,26 @@ head('符号检索：注入前校验靠它');
     let M = null;
     try { M = require(path.join(__dirname, 'assert-replay.js')); } catch (e) { fail('assert-replay.js 可加载', e.message); }
     if (M) {
-      const N = 20;
+      // 量的必须是**真实跑的那条路**：整轮一次的批量检索（5 条 × 20 符号
+      // = 100 个）。量逐符号的老路会给出一个与实际无关的数字。
+      const N = 100;
       const syms = Array.from({ length: N }, (_, i) => `ZzSelfcheckAbsentSymbol${i}`);
+      const o = { cwd: CWD, timeout: 20000, allow: new Set(), mode: 'symbols' };
       const t0 = Date.now();
-      const r = M.checkSymbols({ metadata: { symbols: syms } }, { cwd: CWD, timeout: 20000, allow: new Set(), mode: 'symbols' });
+      const r = M.repoHasIdentifiers(syms, o);
       const ms = Date.now() - t0;
-      const detail = `${N} 个符号 / ${ms}ms（约 ${Math.round(ms / N)}ms 每个）  仓库：${CWD}`;
-      if (r.status === 'error') fail('符号检索可用', `${detail}\n        ${r.detail}`);
-      else if (ms > 2000) fail('单条 20 符号 ≤ 2000ms 预算', `${detail}\n        超出注入路径的总延迟预算——按此估算，每轮 5 条会严重超支`);
+      const detail = `每轮最坏 ${N} 个符号（5 条 × 20）/ ${ms}ms  仓库：${CWD}`;
+      if (r.undetermined) fail('符号检索可用', `${detail}\n        ${r.undetermined}`);
+      else if (ms > 2000) fail('整轮符号检索 ≤ 2000ms 预算', `${detail}\n        超出注入前校验的总延迟预算，每轮提示都会付这笔钱`);
       else if (ms > 1000) warn('接近预算上限', detail);
       else pass('符号检索耗时', detail);
+
+      // 对照：批量比逐个快多少，取决于仓库规模。打出来供人判断这台机器
+      // 上的账是否成立——它也是"批量真的接进主路径了"的一个旁证。
+      const t1 = Date.now();
+      for (let i = 0; i < 10; i++) M.repoHasIdentifier(syms[i], o);
+      const per = (Date.now() - t1) / 10;
+      pass('批量 vs 逐个', `逐个约 ${Math.round(per)}ms/个 → ${N} 个需约 ${Math.round(per * N)}ms；批量实测 ${ms}ms`);
     }
   }
 }
@@ -188,6 +198,57 @@ head('assert-replay：证据重跑与形状兼容');
     const leaked = hostile.filter((c) => M.vetCommand(c, o).ok);
     if (leaked.length) fail('执行边界拦住越界命令', `放行了：${leaked.join(' | ')}`);
     else pass('执行边界拦住越界命令', `${hostile.length} 条样例全部拒绝`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+head('配置：两个值必须由你的项目自己给');
+
+{
+  // 本插件不预设默认值——默认 scope 会让两个不相干的团队共用同一个库。
+  // 缺任何一个，整条经验链路都不工作，而**表现是"没有相关经验"**。
+  const uid = process.env.MEM0_USER_ID || '';
+  const key = process.env.MEM0_API_KEY || '';
+  if (uid.trim()) pass('MEM0_USER_ID 已设置', `scope = ${uid}（团队里所有人必须是同一个值）`);
+  else fail('MEM0_USER_ID 已设置', '放 .claude/settings.json 的 env，它不是凭据，该进版本库');
+  if (key.trim()) pass('MEM0_API_KEY 已设置', `${key.slice(0, 4)}…（长度 ${key.length}）`);
+  else fail('MEM0_API_KEY 已设置', '放 .claude/settings.local.json 的 env 或密钥库，不进版本库');
+}
+
+// ---------------------------------------------------------------------------
+head('检索与写入：两条链路真的跑得起来');
+
+{
+  // 检索挂在每一轮用户提示上。它必须**永远**输出可解析的 JSON 并以 0 退出——
+  // UserPromptSubmit 上非 0 的退出码会挡住用户提问，"取不到经验"绝不能升级
+  // 成"不许提问"。这里连输入都给它一段非 JSON，仍然要求它规矩地退出。
+  const hook = path.join(PLUGIN_ROOT, 'hooks', 'recall.js');
+  const r = spawnSync(process.execPath, [hook], {
+    input: 'not json at all', encoding: 'utf8', timeout: 30000, windowsHide: true,
+    env: { ...process.env, MEM0_USER_ID: '', MEM0_API_KEY: '' },
+  });
+  let okJson = false;
+  try { JSON.parse(r.stdout); okJson = true; } catch (_) { /* 下面报 */ }
+  if (r.status === 0 && okJson) pass('检索 hook 在最坏输入下仍规矩退出', '输出可解析、退出码 0，不会挡住提问');
+  else fail('检索 hook 在最坏输入下仍规矩退出', `code=${r.status} stdout=${String(r.stdout).slice(0, 80)}`);
+
+  // 写入必须硬失败。这里故意送一条自带 status 的条目——它绕过的正是
+  // "必须撞上第二次才进检索"那道闸门，脚本必须拒绝且什么都不写。
+  const write = path.join(PLUGIN_ROOT, 'scripts', 'experience-write.js');
+  const bad = JSON.stringify({
+    information: 'x',
+    metadata: { repo: 'r', commit: 'c', author: 'a', at: '2026-01-01', lens: 'logic', symbols: ['Zz'], status: 'confirmed' },
+  });
+  const w = spawnSync(process.execPath, [write, '-', '--quiet', '--cwd', CWD], {
+    input: bad, encoding: 'utf8', timeout: 30000, windowsHide: true,
+    env: { ...process.env, MEM0_USER_ID: 'selfcheck', MEM0_API_KEY: 'selfcheck' },
+  });
+  let out = null;
+  try { out = JSON.parse(w.stdout); } catch (_) { /* 下面报 */ }
+  if (w.status === 1 && out && out.written === false && /status/.test(out.detail || '')) {
+    pass('写入通道拒绝自带 status 的条目', '退出码 1，且明说库里什么都没多');
+  } else {
+    fail('写入通道拒绝自带 status 的条目', `code=${w.status} ${String(w.stdout).slice(0, 120)}`);
   }
 }
 

@@ -109,7 +109,7 @@ superpowers 自己已经串好了脊：`brainstorming` → `writing-plans` → `
 | 定期审计 mem0 库 | `full` | ⬜ 延后，见 `docs/deferred.md` |
 | 淘汰判定 | — | ⬜ 延后，见 `docs/deferred.md` |
 
-**代码全部留在仓库**——推后的是两个调用点，不是那 898 行脚本与 320 项回归用例。第 2 类校验（符号存在性）从第一条经验起就适用：上面那个 `attachToQBListView` 的失败模式不需要库长大就会发生。
+**代码全部留在仓库**——推后的是两个调用点，不是那 898 行脚本与它的回归用例。第 2 类校验（符号存在性）从第一条经验起就适用：上面那个 `attachToQBListView` 的失败模式不需要库长大就会发生。
 
 **没有它，`evidence_cmd` 只是一个没人跑的字符串。**
 
@@ -174,7 +174,11 @@ superpowers 自己已经串好了脊：`brainstorming` → `writing-plans` → `
 
 ## 经验如何沉淀
 
-**云端 mem0，检索经 MCP，写入经脚本**（端点 `https://mcp.mem0.ai/mcp`，OAuth 或 API key bearer）。
+**云端 mem0，写入与自动检索都经脚本走 REST；MCP 那一组读工具留给 agent 临时查用。**
+
+**这一句原先写的是"检索经 MCP"，落地时发现不成立，如实更正**：自动检索挂在 `UserPromptSubmit` 上，而该事件只支持 `type: "command"` 的 hook（`agent` / `prompt` 两型只对工具事件开放）——一个命令脚本调不到 MCP 工具。因此每轮的检索走 REST，与写入共用 `scripts/mem0.js` 一份契约：**契约若是错的，两条路一起错，改一处即可；各写一份则会出现"写得进去但检索不到"，而两端都不报错。**
+
+`.mcp.json` 里的 mem0 server 仍然保留，作用是让 agent 能主动查库（读工具不在 deny 之列）。端点 `https://mcp.mem0.ai/mcp`，OAuth 或 API key bearer。
 
 ### 写入触发——已延后
 
@@ -506,7 +510,9 @@ metadata:
 
 **只有这两条。** 另两条移入 [`docs/deferred.md`](docs/deferred.md)：写入触发（`PostToolUse` / `Stop` 三条信号 + `UserPromptSubmit` 上的纠正判定）、意图偏离检查（含它的两种形态与前提假设 4）。
 
-**`PreToolUse` 这条闸门在写入脚本落地之前就是正确行为**（写入必须走脚本，脚本还不存在，所以现在什么都不该写进去）。**分档时记下的一项当前状态**（不是设计决定）：deny 已生效而它指向的替代路径 `scripts/experience-write` 尚未存在，因此**在写入脚本落地之前，装上这个插件对用户是净负能力的**——拦掉了 mem0 裸写入，替代路径不存在。这是把 `experience-write` 排为最小可用唯一解锁点的直接理由。
+**两条 hook 的失败方向必须相反，这是有意的**：`deny` 失败关闭（`|| exit 2`，`PreToolUse` 只有 exit 2 才阻断），`recall` 失败开放——`UserPromptSubmit` 上非 0 的退出码会**挡住用户这一轮提问**，而"取不到经验"绝不能升级成"不许提问"。把 `recall` 照抄成 `|| exit 2` 就是把它改坏，有用例守着。
+
+**"deny 已生效而替代路径不存在"这项当前状态已于 2026-09-04 解除**——`scripts/experience-write.js` 已落地。在它落地之前，装上这个插件对用户是净负能力的（拦掉了 mem0 裸写入，替代路径不存在），那正是把它排为最小可用唯一解锁点的理由。
 
 **matcher 有两个会静默失效的陷阱，都不报错：**
 
@@ -521,15 +527,18 @@ metadata:
 
 | 脚本 | 作用 |
 | --- | --- |
-| `scripts/experience-write` | 查库 → 交 skill 判定 → 红线过滤 → `infer=False` 写入；候选合并 |
-| `scripts/assert-replay.js` | ✅ 已落地。重跑 `evidence_cmd` 并比对 + 校验符号存在性。**最小可用要接的消费方是写入自检（`--mode full`）与注入前校验（`--mode symbols`）**；库审计与淘汰判定两个消费方已延后。四个至今无一落地 |
+| `scripts/experience-write.js` | ✅ 已落地。形状 → 红线 → 写入自检 → 查库 → 甲/乙分支 → `infer=false` 写入 → 候选的并发延迟复查 |
+| `scripts/assert-replay.js` | ✅ 已落地。重跑 `evidence_cmd` 并比对 + 校验符号存在性。**两个消费方均已接上**：写入自检（`--mode full`，由 `experience-write` 调）与注入前校验（`--mode symbols`，由 `hooks/recall.js` 调）；库审计与淘汰判定两个消费方已延后 |
+| `scripts/mem0.js` | ✅ 已落地。REST 客户端，**写入与检索共用一份契约**——各写一份则会出现"写得进去但检索不到"，两端都不报错 |
 | `scripts/selfcheck.js` | ✅ 已落地。**装到使用者项目后，让他验证这些在他那儿真的生效** |
+
+**REST 契约本身尚未对活端点验证**：路径、鉴权头形状、请求体字段名来自公开文档，本机没有可用的 key。已实测的只有 MCP 那一侧。验证手段是消费方拿自己的 key 跑 `selfcheck.js --mem0`——**在那一步通过之前，不要声称写入与检索路径可用。**
 
 **为什么要自检**：本插件的强制点全部是静默失效型的——deny 闸门在 node 不在 PATH 时放行且不留痕，符号检索在只有 `grep` 的机器上慢数倍，MCP 连不上时检索静默为空。**这些失效在正常使用中看不见**，使用者会以为闸门在、经验在，实际都不在。
 
 **而它们在使用者环境里比在开发机上更可能发生**：环境异质、仓库更大（符号检索成本随规模增长）、node 未必在 PATH。`selfcheck.js` 逐项实跑并打印结果——包括把解释器换成不存在的程序、确认闸门仍以 exit 2 阻断——**输出设计成可直接贴回来的形式**，不是绿勾。
 
-**安全状态**：两轮独立评审各实测出一批可执行的攻击，全部已修，每条都有回归用例（`evals/assert-replay.test.js`，共 320 项）。边界模型经两次下沉——先从"程序名白名单"到"子命令 + 逐选项显式允许"，再从"词法路径检查"到"realpath 物理围栏"。**第二轮修复尚未经独立评审。**
+**安全状态**：两轮独立评审各实测出一批可执行的攻击，全部已修，每条都有回归用例（`evals/assert-replay.test.js`，共 297 项）。边界模型经两次下沉——先从"程序名白名单"到"子命令 + 逐选项显式允许"，再从"词法路径检查"到"realpath 物理围栏"。**第二轮修复尚未经独立评审。**
 
 脚本用 Node 实现并以 `node <path>` 调用（不依赖 shebang，避免 Windows 上的可执行位与解释器解析问题）。**这引入一项对 Node 的依赖**——不用 `jq` 已是硬约束，而在无 JSON 工具的纯 shell 里处理条目不现实。
 
@@ -545,14 +554,18 @@ project-agent-harness/
 ├── plugins/experience/
 │   ├── .claude-plugin/plugin.json      # 只有这个文件放这里
 │   ├── .mcp.json                       # 云端 mem0（仅检索）
-│   ├── hooks/hooks.json
+│   ├── hooks/
+│   │   ├── hooks.json                  # 两条，失败方向相反
+│   │   ├── recall.js                   # UserPromptSubmit：检索 → 校验 → 注入
+│   │   └── deny.js                     # PreToolUse：拒绝裸调用写入工具
 │   ├── scripts/                        # experience-write / assert-replay
+│   │                                   # / mem0 / selfcheck
 │   ├── skills/
 │   │   └── experience-intake/
 │   │       ├── SKILL.md                # 短；抽取判据 + 指向下面三份
-│   │       ├── review.md               # 九类垃圾，默认保留
-│   │       ├── dedup.md                # 否决式规则，宁严勿宽
-│   │       └── merge.md                # 四动作，保护历史边界
+│   │       ├── review.md               # 三镜头 + 九类垃圾，默认保留
+│   │       ├── dedup.md                # 否决式规则，宁严勿宽（延后，未建）
+│   │       └── merge.md                # 甲/乙分支；四动作留待拿回
 │   └── README.md                       # 模块核心设计随包走
 ├── evals/
 ├── DESIGN.md
@@ -577,7 +590,9 @@ project-agent-harness/
 
 - **常驻成本 ≤ 400 tokens**：全部 skill 的 `description` 之和 + hook 配置
 - **每轮注入 ≤ 1,500 tokens 且 ≤ 5 条**：经验条目 + 使用约束，超出即截断
+- **每轮检索 ≤ 1,500 ms**：网络往返，超时即注入空。**这一条是落地时新增的**——原设计只框住了校验，而检索同样挂在每轮提示上，只框住其中一半等于没框
 - **每轮注入前校验 ≤ 2,000 ms**：由 `assert-replay --budget` 强制，**整轮一次而非逐条**；超预算的条目判为**未验证**、不注入。实测账见「注入前校验的延迟预算」
+- 两条合计**最坏约 3,500 ms/轮**，由 `hooks.json` 的 `timeout: 10` 兜底
 
 **三条分列，因为增长方式不同**：第一条固定，第二条随库增长，第三条随库与仓库规模一起增长。只框住第一条等于框住了不会长的那部分。
 
@@ -593,7 +608,9 @@ project-agent-harness/
 
 **常驻上下文轻，不等于维护面轻。** 原设计的账：4 skill（其中 `experience-intake` 带三份判据文件）+ 4 hook + 2 脚本 + 20 字段 schema + `.claude/rules/` 分流规则 + 5 条前提假设。**"会不会再变庞大"该量的是这个总和**，不只是 400 tokens。
 
-**分档后最小可用的账**（原始数字保留在上一段，供拿回时复原）：**1 skill**（`experience-intake`，带 `review.md` + `merge.md` 两份判据）+ **2 hook** + **2 脚本** + 20 字段 schema + **1 条前提假设**。`.claude/rules/` 分流规则随架构一节延后。**移出的那部分维护面并未消失，只是没有在最小可用发布里到期**——它记在 `docs/deferred.md`，拿回一项就把这笔账加回来一项。
+**分档后最小可用的账**（原始数字保留在上一段，供拿回时复原）：**1 skill**（`experience-intake`，带 `review.md` + `merge.md` 两份判据）+ **2 hook** + **4 脚本** + 20 字段 schema + **1 条前提假设**。`.claude/rules/` 分流规则随架构一节延后。**移出的那部分维护面并未消失，只是没有在最小可用发布里到期**——它记在 `docs/deferred.md`，拿回一项就把这笔账加回来一项。
+
+**落地后的实际行数如实记下**（2026-09-04）：`assert-replay` 898 + `experience-write` 522 + `selfcheck` 303 + `mem0` 106 + `recall` 178 + `deny` 32 = **2,039 行**，另有 4 份 eval 共 418 项断言（297 + 72 + 26 + 23）。**"2 脚本"变成 4 个**：`mem0.js` 是写入与检索共用的 REST 客户端（各写一份会出现"写得进去但检索不到"且两端不报错），`selfcheck.js` 是消费方验证插件在他那儿真的生效的手段。两者都不是可省的，但这笔账确实比分档时估的大——**常驻上下文仍然只有 skill 的 description 加 hook 配置，维护面不是。**
 
 三层治理是本项目唯一一次**主动增重**，理由是有实测支撑：不分层的"抽取即入库"实测约 90% 是废经验，而分层后降到约 5%。**这是全文档唯一有前后对照数据的增项。**（分档后最小可用只带 Review 与 Merge 的 `create`，因此这个 5% 不适用于最小可用阶段，见「写入路径」一节的分档说明。）
 

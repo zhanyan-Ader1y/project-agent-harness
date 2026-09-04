@@ -267,10 +267,17 @@ ok(cli(['-'], 'not json').code === 2, '输入不是 JSON → 退出码 2');
 // ---------------------------------------------------------------------------
 g('能力边界（这些本用例守不住，如实记下）');
 {
-  const src = fs.readFileSync(SCRIPT, 'utf8');
-  ok(/REST 契约尚未对活端点验证/.test(src),
-    'REST 路径与鉴权头未经活端点验证，脚本头部必须明写——去掉这段注释本条即失败');
+  const client = path.join(REPO, 'plugins', 'experience', 'scripts', 'mem0.js');
+  const src = fs.readFileSync(client, 'utf8');
+  ok(/尚未对活端点验证/.test(src),
+    'REST 路径与鉴权头未经活端点验证，客户端头部必须明写——去掉这段注释本条即失败');
   ok(/selfcheck\.js/.test(src), '并指明验证手段是 selfcheck.js --mem0（由消费方拿自己的 key 跑）');
+  ok(/尚未对活端点验证/.test(fs.readFileSync(SCRIPT, 'utf8')), '写入脚本头部也指回这一点');
+  // 写入与检索必须共用同一份契约。各写一份的话，改对了一处、另一处继续错，
+  // 表现是"写得进去但检索不到"，两端都不报错。
+  const recall = fs.readFileSync(path.join(REPO, 'plugins', 'experience', 'hooks', 'recall.js'), 'utf8');
+  ok(/require\(['"]\.\.\/scripts\/mem0\.js['"]\)/.test(recall) && /require\(['"]\.\/mem0\.js['"]\)/.test(fs.readFileSync(SCRIPT, 'utf8')),
+    '写入与检索共用同一个 REST 客户端——契约错了只需改一处');
 }
 
 console.log(`\n${failures === 0 ? 'PASS' : `FAIL — ${failures} 项`}`);

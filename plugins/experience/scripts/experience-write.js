@@ -30,25 +30,16 @@
 //
 // ## REST 契约尚未对活端点验证
 //
-// 下面 MEM0 常量里的路径、鉴权头形状、请求体字段名，来自 mem0 平台 API 的
-// 公开文档，**本机没有可用的 key，因此没有对活端点跑通过**。
-// 已实测的只有 MCP 那一侧（`mcp.mem0.ai`，2026-09-03，11 个工具）。
-//
-// 验证手段是 `selfcheck.js --mem0`：它用消费方自己的 key 发一次只读检索，
-// 确认路径与鉴权头。**在那一步通过之前，不要声称写入路径可用。**
+// 路径、鉴权头形状与请求体字段名都在 `scripts/mem0.js`，那里写明了它们
+// 没有对活端点跑通过、以及验证手段是 `selfcheck.js --mem0`。
+// **在那一步通过之前，不要声称写入路径可用。**
 
 const fs = require('fs');
 const path = require('path');
-const https = require('https');
-const { URL } = require('url');
 const { spawnSync } = require('child_process');
+const mem0 = require('./mem0.js');
 
-const MEM0 = {
-  base: 'https://api.mem0.ai',
-  addPath: '/v1/memories/',
-  searchPath: '/v2/memories/search/',
-  authHeader: (key) => `Token ${key}`,
-};
+const { MEM0 } = mem0;
 
 // 召回前 N 条参与同型判定。**不是相似度阈值**——没有实测过的阈值，
 // 凭空写一个 0.85 正是「数字必须来自实跑」要防的那件事。5 与注入条数
@@ -316,37 +307,6 @@ function selfCheck(entry, opts) {
 // REST
 // ===========================================================================
 
-function postJson(urlStr, body, opts) {
-  const u = new URL(urlStr);
-  const payload = JSON.stringify(body);
-  return new Promise((resolve) => {
-    const req = https.request({
-      hostname: u.hostname,
-      port: u.port || 443,
-      path: u.pathname + u.search,
-      method: 'POST',
-      timeout: opts.timeout,
-      headers: {
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(payload),
-        Authorization: MEM0.authHeader(opts.apiKey),
-      },
-    }, (res) => {
-      let data = '';
-      res.on('data', (c) => { data += c; });
-      res.on('end', () => {
-        let json = null;
-        try { json = JSON.parse(data); } catch (_) { /* 保留原文 */ }
-        resolve({ status: res.statusCode, json, text: data });
-      });
-    });
-    req.on('timeout', () => { req.destroy(new Error(`超时 ${opts.timeout}ms`)); });
-    req.on('error', (e) => resolve({ error: e.message }));
-    req.write(payload);
-    req.end();
-  });
-}
-
 /**
  * 只按 user_id 过滤，**不在服务端按 status 过滤**。
  * 实测确认可用的过滤形状只有 `{AND:[{user_id},{metadata:{status:'confirmed'}}]}`
@@ -421,14 +381,7 @@ function applyDecision(entry, d) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function run(entry, cfg, out) {
-  const search = async () => {
-    const req = buildSearchRequest(entry, cfg);
-    const r = await postJson(req.url, req.body, cfg);
-    if (r.error) return { error: `检索失败：${r.error}` };
-    if (r.status < 200 || r.status >= 300) return { error: `检索返回 ${r.status}：${String(r.text).slice(0, 200)}` };
-    const list = Array.isArray(r.json) ? r.json : (r.json && (r.json.results || r.json.memories)) || [];
-    return { hits: Array.isArray(list) ? list : [] };
-  };
+  const search = () => mem0.search(cfg, buildSearchRequest(entry, cfg).body);
 
   const s = await search();
   if (s.error) return { ok: false, detail: s.error };
@@ -441,11 +394,8 @@ async function run(entry, cfg, out) {
 
   if (cfg.dryRun) return { ok: true, detail: '--dry-run：判定全部完成，未发写入请求' };
 
-  const w = await postJson(out.request.url, out.request.body, cfg);
-  if (w.error) return { ok: false, detail: `写入失败：${w.error}` };
-  if (w.status < 200 || w.status >= 300) {
-    return { ok: false, detail: `写入返回 ${w.status}：${String(w.text).slice(0, 200)}` };
-  }
+  const w = await mem0.add(cfg, out.request.body);
+  if (w.error) return { ok: false, detail: w.error };
   out.written = true;
 
   // 并发竞态的延迟复查。只有刚写下候选时才需要——已经是 confirmed 的条目
@@ -476,9 +426,9 @@ async function run(entry, cfg, out) {
     occurrences: '2',
     promoted_from: String(rival.id || (rival.metadata && rival.metadata.id) || ''),
   });
-  const pw = await postJson(cfg.apiBase + MEM0.addPath, buildAddRequest(promoted, cfg).body, cfg);
-  if (pw.error || pw.status < 200 || pw.status >= 300) {
-    out.raceCheck = `发现并发候选但晋级写入失败（${pw.error || pw.status}）——候选仍在库里`;
+  const pw = await mem0.add(cfg, buildAddRequest(promoted, cfg).body);
+  if (pw.error) {
+    out.raceCheck = `发现并发候选但晋级写入失败（${pw.error}）——候选仍在库里`;
     return { ok: true, detail: '已写入（候选）；晋级未完成' };
   }
   out.raceCheck = '发现并发候选，已按 tie-break 晋级';
@@ -488,15 +438,8 @@ async function run(entry, cfg, out) {
 // ===========================================================================
 
 function main(argv) {
-  const cfg = {
-    cwd: process.cwd(),
-    apiBase: process.env.MEM0_API_BASE || MEM0.base,
-    apiKey: process.env.MEM0_API_KEY || '',
-    userId: process.env.MEM0_USER_ID || '',
-    timeout: 15000,
-    dryRun: false,
-    quiet: false,
-  };
+  const cfg = { cwd: process.cwd(), timeout: 15000, dryRun: false, quiet: false };
+  const over = {};
   const rest = [];
   const need = (flag, v) => {
     if (v === undefined || String(v).startsWith('-')) throw new Error(`${flag} 缺少取值`);
@@ -506,8 +449,8 @@ function main(argv) {
     for (let i = 0; i < argv.length; i++) {
       const a = argv[i];
       if (a === '--cwd') cfg.cwd = need('--cwd', argv[++i]);
-      else if (a === '--user-id') cfg.userId = need('--user-id', argv[++i]);
-      else if (a === '--api-base') cfg.apiBase = String(need('--api-base', argv[++i])).replace(/\/$/, '');
+      else if (a === '--user-id') over.userId = need('--user-id', argv[++i]);
+      else if (a === '--api-base') over.apiBase = need('--api-base', argv[++i]);
       else if (a === '--timeout') cfg.timeout = Number(need('--timeout', argv[++i]));
       else if (a === '--dry-run') cfg.dryRun = true;
       else if (a === '--quiet') cfg.quiet = true;
@@ -519,8 +462,9 @@ function main(argv) {
     if (!fs.existsSync(cfg.cwd) || !fs.statSync(cfg.cwd).isDirectory()) throw new Error(`--cwd 不是存在的目录：${cfg.cwd}`);
     // 缺凭据必须硬失败。挑一个默认 user_id，写进去的取不回来；跳过写入，
     // 用户看到"记下了"而库里什么都没有。两者都是静默失效。
-    if (!nonEmpty(cfg.userId)) throw new Error('缺 MEM0_USER_ID——共享库的 scope 必须由项目显式配置，本插件不预设默认值');
-    if (!nonEmpty(cfg.apiKey)) throw new Error('缺 MEM0_API_KEY——写入走 REST，凭据只能从环境变量取（headersHelper 只管 MCP 检索那条路）');
+    const c = mem0.resolveConfig(process.env, { ...over, timeout: cfg.timeout });
+    if (c.error) throw new Error(c.error);
+    Object.assign(cfg, c.cfg);
   } catch (e) {
     process.stderr.write(`${e.message}\n用法：node experience-write.js <entry.json|-> [--dry-run] [--cwd dir] [--user-id id] [--api-base url] [--timeout ms] [--quiet]\n`);
     return Promise.resolve(2);
