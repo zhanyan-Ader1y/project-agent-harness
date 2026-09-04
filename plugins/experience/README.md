@@ -38,6 +38,25 @@
 
 两者归属不同才分开放：scope 是团队约定，key 是个人凭据。写反了要么共享失效，要么把 key 提交进库。
 
+### 不要把凭据写进 `.mcp.json`
+
+**默认不用配任何凭据**——MCP 走 OAuth 浏览器登录，`.mcp.json` 里只有 URL。
+
+需要用 API key 的场景（CI、无浏览器），加这一行，**凭据仍然只在环境变量里**：
+
+```json
+"headersHelper": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/auth-headers.js\""
+```
+
+| 别写 | 为什么 |
+| --- | --- |
+| `"headers": { "Authorization": "Bearer m0-…" }` | 静态字段，写上就等于把 key 提交进版本库 |
+| `"oauth": { "clientSecret": "…" }` | `oauth` 是受支持字段，但 `clientSecret` 一样是凭据；官方示例给的是 `clientId` + `callbackPort`，不含 secret |
+
+**两条都有用例守着**（`evals/no-credentials.test.js`），整个已跟踪仓库都在扫描范围内。
+
+取不到 key 时 `auth-headers.js` **非 0 退出并说明原因**，不输出 `{}` 也不输出空 header——前者静默退回 OAuth 登录（CI 里正是配它要避免的），后者拿坏 header 去连、服务端回 401，而你看到的是"检索不到经验"。
+
 **缺任何一个都硬失败，不静默降级**——缺 scope 则写进去的取不回来，缺 key 则"记下了"其实什么都没发生。**检索走 MCP、写入走 REST，两条路必须取到同一对值**，否则表现是"写入成功但永远检索不到"且两端都不报错。自检覆盖这一项。
 
 ## 装好之后先跑自检

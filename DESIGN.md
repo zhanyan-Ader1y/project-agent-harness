@@ -740,7 +740,7 @@ project-agent-harness/
 
 **受管环境的 `allowManagedHooksOnly`** 可能整体禁用本项目的 hook，闸门静默失效——团队推广前须确认。
 
-**`headersHelper` 的实际行为**——凭据注入依赖它，尚未实测。
+~~**`headersHelper` 的实际行为**——凭据注入依赖它，尚未实测。~~ **已于 2026-09-04 查官方文档确认并落地**，见下「凭据」一节。**本节现在只剩上面那一条。**
 
 ## 凭据
 
@@ -753,10 +753,25 @@ project-agent-harness/
 需要用 API key 的场景（CI、无浏览器），用官方的 **`headersHelper`** 指向一个脚本，由脚本从环境变量或密钥库吐出 header：
 
 ```json
-"headersHelper": "${CLAUDE_PLUGIN_ROOT}/scripts/auth-headers.sh"
+"headersHelper": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/auth-headers.js\""
 ```
 
-**不得使用静态 `headers` 字段**——那等于把 key 提交进版本库。
+**不得使用静态 `headers` 字段**——那等于把 key 提交进版本库。**这一条由 `evals/no-credentials.test.js` 强制**，不是一句劝告。
+
+**这段配置曾经是断的，如实记下（2026-09-04）**：上一版写的是 `…/scripts/auth-headers.sh`，而**那个脚本从来没被写出来过**，且 `.sh` 违反本项目"脚本一律 Node、以 `node <path>` 调用"的既定约定（Windows 上 shebang 与可执行位都不可靠）。后果不是"少个文件"——**一条规则挡住了唯一的替代路径，等于没有规则**：照文档配会失败，于是只剩被禁止的那条静态 `headers` 走得通。实际也确实发生了一次真实凭据被写进 `.mcp.json`。
+
+**契约已查官方文档确认（2026-09-04）**：
+
+| | |
+| --- | --- |
+| 输出 | **往 stdout 输出一个字符串键值的 JSON 对象**，如 `{"Authorization":"Bearer …"}` |
+| 执行 | Claude Code **在 shell 里**跑它，10 秒后放弃 |
+| 覆盖关系 | 动态 header 覆盖同名的静态 `headers` |
+| `${CLAUDE_PLUGIN_ROOT}` | 在 http 类 server 的 `url` / `headers` / `headersHelper` **三个字段里都会展开** |
+
+**取不到 key 时脚本响亮地失败**（非 0 退出 + stderr），不输出 `{}` 也不输出空 header——前者是静默退回 OAuth 浏览器登录（在 CI 里正是配它要避免的情形），后者是拿一个坏 header 去连、服务端回 401，而用户看到的是"检索不到经验"。**两种都是静默失效。**
+
+**`oauth` 也是受支持字段**（`clientId` / `clientSecret` / `callbackPort`），但**同样不得把 `clientSecret` 写进这个文件**——它是凭据，与 API key 没有区别。官方示例给的是 `clientId` + `callbackPort`，不含 secret。
 
 **`headersHelper` 只管检索那条路。** 它是 MCP 客户端的配置，写入脚本是独立进程、直连 REST，不经过 MCP 客户端，因此对它无效——写入脚本只能读 `MEM0_API_KEY`。**两条路各取各的凭据，一致性由 `selfcheck.js` 核对**（见上「`user_id` 与 API key」）。
 

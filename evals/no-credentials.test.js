@@ -83,6 +83,53 @@ g('整个已跟踪的仓库都不得出现凭据');
 }
 
 // ---------------------------------------------------------------------------
+g('被禁止的做法必须有一条走得通的替代路径');
+{
+  // **这一组是 2026-09-04 那次真实凭据泄露的直接产物。**
+  // DESIGN 禁止静态 headers，让人改用 headersHelper 指向
+  // scripts/auth-headers.sh——**而那个脚本从来没被写出来过**。
+  // 照文档配会失败，于是唯一走得通的就是被禁止的那条。
+  //
+  // **一条规则挡住了唯一的替代路径，等于没有规则。**
+  const helper = path.join(REPO, 'plugins', 'experience', 'scripts', 'auth-headers.js');
+  ok(fs.existsSync(helper), 'headersHelper 指向的脚本真的存在', helper);
+
+  const design = fs.readFileSync(path.join(REPO, 'DESIGN.md'), 'utf8');
+  // 取整行，不去解析里面的转义引号——上一版的正则在 `node \"` 处就断了，
+  // 于是断言对着半截字符串跑，这条用例自己就成了它要防的东西。
+  const snippet = design.split('\n').find((l) => l.includes('"headersHelper"')) || '';
+  ok(snippet.includes('auth-headers.js'), 'DESIGN 的示例指向 .js 而非从未存在的 .sh', snippet);
+  ok(snippet.includes('node'), 'DESIGN 的示例以 node 调用——本项目脚本不依赖 shebang 与可执行位', snippet);
+
+  if (fs.existsSync(helper)) {
+    // 契约（官方文档）：往 stdout 输出一个字符串键值的 JSON 对象。
+    const good = spawnSync(process.execPath, [helper], {
+      encoding: 'utf8', timeout: 20000, windowsHide: true,
+      env: { ...process.env, MEM0_API_KEY: 'zz-eval-fake-key' },
+    });
+    let parsed = null;
+    try { parsed = JSON.parse(good.stdout); } catch (_) { /* 下面报 */ }
+    ok(good.status === 0 && parsed && typeof parsed === 'object' && !Array.isArray(parsed),
+      '有 key 时输出字符串键值的 JSON 对象', `code=${good.status} out=${good.stdout.slice(0, 60)}`);
+    ok(parsed && Object.values(parsed).every((v) => typeof v === 'string'),
+      '取值全是字符串（契约要求）', JSON.stringify(parsed));
+    ok(parsed && /^Bearer /.test(parsed.Authorization || ''),
+      'MCP 侧用 Bearer——2026-09-03 对活端点实测过', JSON.stringify(parsed));
+
+    // 取不到 key 时**不许**输出 {} 或空 header：前者静默退回 OAuth 浏览器
+    // 登录（CI 里正是配它要避免的），后者拿坏 header 去连、服务端 401，
+    // 而用户看到的是"检索不到经验"。两种都是静默失效。
+    const bare = spawnSync(process.execPath, [helper], {
+      encoding: 'utf8', timeout: 20000, windowsHide: true,
+      env: { ...process.env, MEM0_API_KEY: '' },
+    });
+    ok(bare.status !== 0, '缺 key 时非 0 退出，响亮地失败', `code=${bare.status}`);
+    ok(bare.stdout.trim() === '', '缺 key 时 stdout 为空——不输出 {} 也不输出空 header', JSON.stringify(bare.stdout));
+    ok(/MEM0_API_KEY/.test(bare.stderr), '缺 key 时说清缺的是什么', bare.stderr.split('\n')[0]);
+  }
+}
+
+// ---------------------------------------------------------------------------
 g('规矩本身还在文档里——删掉它，这组用例就成了没人知道为什么的检查');
 {
   const design = fs.readFileSync(path.join(REPO, 'DESIGN.md'), 'utf8');

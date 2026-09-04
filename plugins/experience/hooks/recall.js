@@ -69,7 +69,7 @@ function sentenceOf(hit) {
 function verified(entries, cwd) {
   const script = path.join(__dirname, '..', 'scripts', 'assert-replay.js');
   const r = spawnSync(process.execPath, [
-    script, '-', '--mode', 'symbols', '--cwd', cwd, '--budget', String(VERIFY_BUDGET_MS), '--quiet',
+    script, '-', '--mode', 'full', '--cwd', cwd, '--budget', String(VERIFY_BUDGET_MS), '--quiet',
   ], {
     input: entries.map((e) => JSON.stringify(e)).join('\n'),
     encoding: 'utf8',
