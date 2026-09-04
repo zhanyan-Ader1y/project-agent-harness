@@ -270,6 +270,7 @@ if (!WITH_MEM0) {
 
   if (url) {
     (async () => {
+      // ---- 一、MCP 那一侧：工具名必须与 deny hook 的 matcher 对得上 ----
       try {
         const r = await fetch(url.endsWith('/') ? url : `${url}/`, {
           method: 'POST',
@@ -289,6 +290,71 @@ if (!WITH_MEM0) {
       } catch (e) {
         fail('mem0 可达', e.message);
       }
+
+      // ---- 二、REST 那一侧：写入与检索真正走的路 ----
+      //
+      // **这一段是 2026-09-04 补的，补之前上面那半段是唯一的探活。**
+      // 而写入脚本与检索 hook 一条都不走 MCP，它们走 api.mem0.ai 的 REST。
+      // 于是三个文件里"验证手段是 selfcheck --mem0"那句话指向了一个
+      // 根本不验证 REST 的检查——**声称有执行者而执行者不在那一层**。
+      //
+      // 只发只读检索，**绝不写**：拿别人的库做探活不能留下痕迹。
+      const mem0 = require(path.join(__dirname, 'mem0.js'));
+      const uid = process.env.MEM0_USER_ID || '';
+      if (!uid.trim()) {
+        fail('REST 契约可验证', '缺 MEM0_USER_ID，检索需要它作 scope');
+      } else {
+        // 鉴权头形状本身就是待验的东西之一，所以两种都试，报告哪种成立。
+        const schemes = [['Token', (k) => `Token ${k}`], ['Bearer', (k) => `Bearer ${k}`]];
+        let done = false;
+        for (const [label, make] of schemes) {
+          if (done) break;
+          const target = `${mem0.MEM0.base}${mem0.MEM0.searchPath}`;
+          try {
+            const r = await fetch(target, {
+              method: 'POST',
+              headers: { Authorization: make(process.env.MEM0_API_KEY), 'Content-Type': 'application/json' },
+              body: JSON.stringify({ query: 'selfcheck probe', filters: { AND: [{ user_id: uid }] }, top_k: 1 }),
+            });
+            const body = await r.text();
+            if (r.status === 401 || r.status === 403) continue;   // 换一种鉴权头再试
+            if (r.status === 404) {
+              fail('REST 检索路径正确', `${target} → HTTP 404，路径不对（这条契约本就未经实测）`);
+              done = true;
+              break;
+            }
+            if (!r.ok) {
+              fail('REST 检索可用', `${target} → HTTP ${r.status}：${body.slice(0, 160)}`);
+              done = true;
+              break;
+            }
+            let json = null;
+            try { json = JSON.parse(body); } catch (_) { /* 下面报 */ }
+            const container = Array.isArray(json) ? '顶层数组'
+              : (json && Array.isArray(json.results)) ? 'results'
+                : (json && Array.isArray(json.memories)) ? 'memories' : null;
+            if (!container) {
+              fail('REST 响应形状认得出', `实得：${body.slice(0, 160)}\n        mem0.js 的 hitsOf 认三种：顶层数组 / results / memories`);
+            } else {
+              pass('REST 检索路径与鉴权头已实测',
+                `${mem0.MEM0.searchPath}  鉴权头 "${label} <key>"  响应容器：${container}`);
+              if (label !== 'Token') {
+                fail('mem0.js 的 authHeader 与实测一致',
+                  `实测成立的是 "${label}"，而 mem0.js 里写的是 "Token"——**写入与检索都会 401**`);
+              }
+            }
+            done = true;
+          } catch (e) {
+            fail('REST 可达', `${target}：${e.message}`);
+            done = true;
+          }
+        }
+        if (!done) fail('REST 鉴权', 'Token 与 Bearer 两种鉴权头都被拒（401/403）——key 无效，或该 key 没有 REST 权限');
+      }
+
+      // 写入路径**不探活**：往使用者的共享库里塞一条探针经验，等于用自检
+      // 污染真实数据。REST 的 add 路径只能等第一条真经验去验。
+      warn('REST 写入路径未探活', `${mem0.MEM0.addPath} 只能由第一次真实写入来验证——自检不往你的库里写东西`);
       finish();
     })();
     return;

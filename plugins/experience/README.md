@@ -44,14 +44,19 @@
 
 ```bash
 node plugins/experience/scripts/selfcheck.js --cwd <你的仓库>
-node plugins/experience/scripts/selfcheck.js --cwd <你的仓库> --mem0   # 需 MEM0_API_KEY
+node plugins/experience/scripts/selfcheck.js --cwd <你的仓库> --mem0   # 需 MEM0_API_KEY + MEM0_USER_ID
 ```
+
+**`--mem0` 用的是你自己的 key，在你自己的项目里跑——凭据不进任何仓库，也不必给任何人。** 它做两件事：探 MCP 的工具名与 deny hook 的 matcher 对不对得上；发一次**只读**检索验 REST 的路径与鉴权头（`Token` 与 `Bearer` 都试，报告哪种成立）。
+
+**它不验写入路径**——自检不往你的共享库里塞探针经验，那是用探活污染真实数据。写入只能由第一条真经验来验。
 
 **为什么必须跑**：本插件的强制点全部是**静默失效型**的——
 
 - `node` 不在 PATH 时，deny 闸门**放行且不留痕**（`cmd.exe` 下退出码是 0）
 - 只有 `grep` 没有 `rg` 的机器上，符号检索慢数倍，可能直接超出注入预算
 - MCP 连不上时，检索静默返回空——看起来像"没有相关经验"
+- **REST 契约（路径、鉴权头）尚未对活端点验证过**，写错了的表现是"写得进去但检索不到"，两端都不报错
 
 **正常使用中你看不见这些**：你会以为闸门在、经验在，实际都不在。自检逐项实跑（包括把解释器换成不存在的程序、确认闸门仍以 exit 2 阻断）并打印耗时，**输出可以直接贴出来**。
 
