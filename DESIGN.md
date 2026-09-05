@@ -105,7 +105,7 @@ superpowers 自己已经串好了脊：`brainstorming` → `writing-plans` → `
 
 **这是目标四唯一的机器强制，不是一句原则。**
 
-前身项目对这一族有全项目最强的实测：`docs/plan/spec-replay/hard-enforcement-list.md` 按**实际发生次数**排序的 11 条硬强制清单里，「数值型与存在性 claim 必须由执行时真实运行的命令产生并就地附输出」排第 1 位，实发 8 次以上、全清单最高频，且**机器化成本最低**。其 ADR 进一步判定 `themis verify` 是候选里"唯一能拦住而不只是发现的"。
+前身项目对这一族有全项目最强的实测：**前身仓库**的 `docs/plan/spec-replay/hard-enforcement-list.md`（**不在本仓库**；本地提炼件见 [`docs/references/themis-hard-enforcement-list.md`](docs/references/themis-hard-enforcement-list.md)）按**实际发生次数**排序的 11 条硬强制清单里，「数值型与存在性 claim 必须由执行时真实运行的命令产生并就地附输出」排第 1 位，实发 8 次以上、全清单最高频，且**机器化成本最低**。其 ADR 进一步判定 `themis verify` 是候选里"唯一能拦住而不只是发现的"。
 
 **同一份记录还排除了一个近似形态**：某次执行者在同一文件紧邻处粘贴了原始输出（11 行），结论里却写了 10。**命令在、输出也在，数字仍然错**——只检查"字段存不存在"覆盖不了"跑了但抄错"。
 
@@ -531,9 +531,15 @@ metadata:
 
 **三条。** 另两条移入 [`docs/deferred.md`](docs/deferred.md)：写入触发（`PostToolUse` / `Stop` 三条信号 + `UserPromptSubmit` 上的纠正判定）、意图偏离检查（含它的两种形态与前提假设 4）。
 
-**三条的失败方向不同，改动前先看清楚**：`deny` 失败关闭（`|| exit 2`）；`recall` 与 `fact-priority` 失败开放——前者非 0 会挡住用户这一轮提问，后者非 0 会把错误抛回给模型，而**读文件这件事不能因为一条附加 hook 而出问题**。
+**三条的失败方向不同，这是有意的，改动前先看清楚：**
 
-**两条 hook 的失败方向必须相反，这是有意的**：`deny` 失败关闭（`|| exit 2`，`PreToolUse` 只有 exit 2 才阻断），`recall` 失败开放——`UserPromptSubmit` 上非 0 的退出码会**挡住用户这一轮提问**，而"取不到经验"绝不能升级成"不许提问"。把 `recall` 照抄成 `|| exit 2` 就是把它改坏，有用例守着。
+| hook | 解释器缺失时 | 为什么 |
+| --- | --- | --- |
+| `deny` | **失败关闭**（`\|\| exit 2`） | `PreToolUse` 只有 exit 2 才阻断；放行等于绕过写入脚本的全部把关 |
+| `recall` | **失败开放** | `UserPromptSubmit` 上非 0 会**挡住用户这一轮提问**——"取不到经验"绝不能升级成"不许提问" |
+| `fact-priority` | **失败开放** | `PostToolUse` 上非 0 会把错误抛回给模型；**读一个文件不能因为一条附加 hook 而出问题** |
+
+**把后两条照抄成 `|| exit 2` 就是把它们改坏**，有用例守着。
 
 **"deny 已生效而替代路径不存在"这项当前状态已于 2026-09-04 解除**——`scripts/experience-write.js` 已落地。在它落地之前，装上这个插件对用户是净负能力的（拦掉了 mem0 裸写入，替代路径不存在），那正是把它排为最小可用唯一解锁点的理由。
 
@@ -553,7 +559,10 @@ metadata:
 | `scripts/experience-write.js` | ✅ 已落地。形状 → 红线 → 写入自检 → 查库 → 甲/乙分支 → `infer=false` 写入 → 候选的并发延迟复查 |
 | `scripts/assert-replay.js` | ✅ 已落地。重跑 `evidence_cmd` 并比对 + 校验符号存在性。**两个消费方均已接上**：写入自检（`--mode full`，由 `experience-write` 调）与注入前校验（`--mode symbols`，由 `hooks/recall.js` 调）；库审计与淘汰判定两个消费方已延后 |
 | `scripts/mem0.js` | ✅ 已落地。REST 客户端，**写入与检索共用一份契约**——各写一份则会出现"写得进去但检索不到"，两端都不报错 |
+| `scripts/auth-headers.js` | ✅ 已落地。`.mcp.json` 的 `headersHelper`——把 key 注入 MCP 连接而**不让它进任何文件**；取不到 key 时响亮地失败 |
 | `scripts/selfcheck.js` | ✅ 已落地。**装到使用者项目后，让他验证这些在他那儿真的生效** |
+
+hook 侧另有三个脚本：`hooks/deny.js`、`hooks/recall.js`、`hooks/fact-priority.js`，见上「hook 清单」。
 
 **REST 契约本身尚未对活端点验证**：路径、鉴权头形状、请求体字段名来自公开文档，本机没有可用的 key。已实测的只有 MCP 那一侧。
 
@@ -588,11 +597,12 @@ project-agent-harness/
 │   ├── .claude-plugin/plugin.json      # 只有这个文件放这里
 │   ├── .mcp.json                       # 云端 mem0（仅检索）
 │   ├── hooks/
-│   │   ├── hooks.json                  # 两条，失败方向相反
+│   │   ├── hooks.json                  # 三条，失败方向见「hook 清单」
 │   │   ├── recall.js                   # UserPromptSubmit：检索 → 校验 → 注入
+│   │   ├── fact-priority.js            # PostToolUse/Read：读到架构/spec/ADR 时降级
 │   │   └── deny.js                     # PreToolUse：拒绝裸调用写入工具
-│   ├── scripts/                        # experience-write / assert-replay
-│   │                                   # / mem0 / selfcheck
+│   ├── scripts/                        # experience-write / assert-replay / mem0
+│   │                                   # / auth-headers / selfcheck
 │   ├── skills/
 │   │   └── experience-intake/
 │   │       ├── SKILL.md                # 短；抽取判据 + 指向下面三份
@@ -600,7 +610,8 @@ project-agent-harness/
 │   │       ├── dedup.md                # 否决式规则，宁严勿宽（延后，未建）
 │   │       └── merge.md                # 甲/乙分支；四动作留待拿回
 │   └── README.md                       # 模块核心设计随包走
-├── evals/
+├── evals/                              # 7 份 487 项；run-all.js 自动发现 *.test.js
+├── .github/workflows/evals.yml         # 门禁：双 OS matrix，首次运行 2026-09-04
 ├── DESIGN.md
 └── docs/
     ├── deferred.md                     # 分档移出的设计：原文 + 理由 + 拿回条件
@@ -641,9 +652,27 @@ project-agent-harness/
 
 **常驻上下文轻，不等于维护面轻。** 原设计的账：4 skill（其中 `experience-intake` 带三份判据文件）+ 4 hook + 2 脚本 + 20 字段 schema + `.claude/rules/` 分流规则 + 5 条前提假设。**"会不会再变庞大"该量的是这个总和**，不只是 400 tokens。
 
-**分档后最小可用的账**（原始数字保留在上一段，供拿回时复原）：**1 skill**（`experience-intake`，带 `review.md` + `merge.md` 两份判据）+ **2 hook** + **4 脚本** + 20 字段 schema + **1 条前提假设**。`.claude/rules/` 分流规则随架构一节延后。**移出的那部分维护面并未消失，只是没有在最小可用发布里到期**——它记在 `docs/deferred.md`，拿回一项就把这笔账加回来一项。
+**分档时估的账**：**1 skill**（`experience-intake`，带 `review.md` + `merge.md` 两份判据）+ **2 hook** + **4 脚本** + 20 字段 schema + **1 条前提假设**。**移出的那部分维护面并未消失，只是没有在最小可用发布里到期**——它记在 `docs/deferred.md`，拿回一项就把这笔账加回来一项。
 
-**落地后的实际行数如实记下**（2026-09-04）：`assert-replay` 898 + `experience-write` 522 + `selfcheck` 303 + `mem0` 106 + `recall` 178 + `deny` 32 = **2,039 行**，另有 4 份 eval 共 418 项断言（297 + 72 + 26 + 23）。**"2 脚本"变成 4 个**：`mem0.js` 是写入与检索共用的 REST 客户端（各写一份会出现"写得进去但检索不到"且两端不报错），`selfcheck.js` 是消费方验证插件在他那儿真的生效的手段。两者都不是可省的，但这笔账确实比分档时估的大——**常驻上下文仍然只有 skill 的 description 加 hook 配置，维护面不是。**
+**落地后的实际账，如实记下**（2026-09-04）：
+
+| | 估 | 实际 | 差在哪 |
+| --- | --- | --- | --- |
+| skill | 1 | **1** | — |
+| hook | 2 | **3** | `fact-priority` 是目标四拿回的那半，分档时它还在 `deferred.md` 里 |
+| 脚本 | 4 | **5** | `auth-headers.js` 分档时不存在——它是"规矩指向一个装不上的东西"暴露出来的 |
+
+```text
+assert-replay 898 + experience-write 525 + selfcheck 384 + mem0 116 + auth-headers 59
+              + recall 185 + fact-priority 102 + deny 32  =  2,301 行
+eval 7 份 487 项：297 + 72 + 41 + 30 + 23 + 17 + 7
+```
+
+**"2 脚本"变成 5 个**，三个增量各有不可省的理由：`mem0.js` 是写入与检索共用的 REST 契约（各写一份会出现"写得进去但检索不到"且两端不报错）；`selfcheck.js` 是消费方验证插件在他那儿真的生效的手段；`auth-headers.js` 是"不得内联凭据"这条规矩唯一走得通的替代路径。
+
+**这笔账比分档时估的大了约一倍，而且是一路加上来的**——每一项加进来时都能回答"删掉它会发生什么坏事"，但没有一处停下来重算总和。约束 1 说的是"不能再变庞大"，量的正是这个总和。**下一次新增之前，先看这张表。**
+
+**常驻上下文没有跟着涨**：仍然只有 skill 的 description 加 hook 配置。**维护面涨了，两者不是一回事。**
 
 三层治理是本项目唯一一次**主动增重**，理由是有实测支撑：不分层的"抽取即入库"实测约 90% 是废经验，而分层后降到约 5%。**这是全文档唯一有前后对照数据的增项。**（分档后最小可用只带 Review 与 Merge 的 `create`，因此这个 5% 不适用于最小可用阶段，见「写入路径」一节的分档说明。）
 
@@ -671,7 +700,18 @@ project-agent-harness/
 4. ✅ 畸形输入必须判失败，不得返回"全部通过"；CLI 的 0/1/2 退出码语义
 5. ⬜ 裸 `delete_all_memories` 必须被 deny（需连上 mem0）
 6. ⬜ mem0 不可达时的降级行为符合预期（见前提假设表）
-7. ⬜ 注入超过双上限时必须截断
+7. ✅ 注入超过双上限时必须截断
+
+**后来由真实事故补进来的四组**——它们不是设计时想到的，是**踩了才有的**，如实标注来源：
+
+| 组 | 来源 |
+| --- | --- |
+| 注入路径永不执行命令（`--mode symbols`） | `recall.js` 的 mode 真的被改成过 `full` 并推上远端，而**当时没有任何用例守着它** |
+| 仓库里不得出现凭据 | 真实凭据被写进过 `.mcp.json`；拦住它的不是任何机制，是提交前有人看了一眼 |
+| 被禁止的做法必须有走得通的替代路径 | 上一条的根因：`headersHelper` 指向的脚本从来没写出来过 |
+| 文档提到的路径必须存在 | 同上，最机械也最容易自动核对的那一类 |
+
+**这四组的共同形状是：规则写下了，执行者不在那一层。** 与本项目要防的东西一字不差——只是这次发作在自己身上。
 
 **符号存在性用例必须对着 `evals/fixtures/` 下的受控仓库跑，不得对着本仓库。** 检查搜索整个 cwd，用例里写下的"编造符号"会被自己搜到——自指测量，用例恒不通过。这一条已实际发生过一次。
 

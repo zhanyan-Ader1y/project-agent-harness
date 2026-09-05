@@ -48,13 +48,31 @@ node evals/run-all.js                        # 全部评测用例
 
 ## 当前进度
 
-设计完成，实现刚起步。已落地两件：
+**部件齐了，闭环还差最后一步。** 5 个脚本 + 3 条 hook + 1 个 skill，2,301 行，**7 份 eval 共 487 项断言**，CI 双 OS matrix 全绿。
 
-- **闸门**：拦下对 mem0 写入与删除工具的直接调用。写入必须走脚本，而写入脚本尚未落地，所以现在什么都不该被写进经验库。
-- **`assert-replay`**：重跑经验里的 `evidence_cmd` 并校验符号存在性。不依赖 mem0，可独立使用。
+最小可用的定义是一句话，它有三段——**三段的成熟度不一样**：
 
-`skills/`、`scripts/experience-write` 刻意未建空壳，理由见[插件 README](plugins/experience/README.md)。
+| | 执行者 | 状态 |
+| --- | --- | --- |
+| 一条经验能**写进**跨会话跨成员共享的库 | `scripts/experience-write.js` | 🟡 已落地，**端到端未跑通** |
+| 下次相关提问时它**自动回到**上下文 | `hooks/recall.js`（`UserPromptSubmit`） | 🟡 已落地，**端到端未跑通** |
+| 注入前**机器验过**它声称的符号真的存在 | `scripts/assert-replay.js` | ✅ 完全可验、已验 |
 
-**mem0 的行为已于 2026-09-03 对活端点实测**：工具名、`infer=false` 的效果、metadata 的序列化形状、按 metadata 过滤、异步索引延迟——结论见 `DESIGN.md`「已实测的 mem0 行为」。现行 hook matcher 已确认覆盖得住写入与删除类工具。
+**两处 🟡 卡在同一件事**：写入与检索共用 `scripts/mem0.js` 的 REST 契约，而**那份契约没有对活端点跑通过**——本机没有可用的 key。已实测的只有 MCP 那一侧。契约错了的表现是**"写得进去但检索不到"，两端都不报错**，所以不声称它可用。
 
-**仍未确认的两项**，见 `DESIGN.md`「仍未确认的」：受管环境的 `allowManagedHooksOnly` 可能整体禁用本项目的 hook；凭据注入用的 `headersHelper` 尚未实测。
+**解法不需要把 key 给任何人**：在你自己的项目里配好 `MEM0_USER_ID` 与 `MEM0_API_KEY`，跑一次 `node plugins/experience/scripts/selfcheck.js --cwd . --mem0`。它只发**只读**检索。
+
+### 四条目标的落地程度并不均衡
+
+| 目标 | 执行者 | 状态 |
+| --- | --- | --- |
+| 经验沉淀 | 写入脚本 + 检索 hook + intake skill | 🟡 主体已落地，卡在 REST |
+| 事实准确 | `assert-replay`（硬强制）+ `fact-priority` hook（读时注入） | 🟡 两个消费方接了两个，另两个随淘汰延后 |
+| 意图确立 | — | ❌ **一个执行者都没有**，整条见 `docs/deferred.md` |
+| review 增强 | — | ❌ 整条延后，是延后项里成本最低的一个 |
+
+### 已实测 / 仍未确认
+
+**已实测**：mem0 的 MCP 侧行为（工具名、`infer=false` 不整合、metadata 是字符串键值模型、按 metadata 过滤、异步索引延迟约 725ms，2026-09-03）；`type: "agent"` hook 可用；`headersHelper` 的契约与 `${CLAUDE_PLUGIN_ROOT}` 的展开范围（2026-09-04 查官方文档）。
+
+**仍未确认只剩一项**：受管环境的 `allowManagedHooksOnly` 可能整体禁用本项目的 hook，闸门静默失效——团队推广前须确认。

@@ -17,6 +17,7 @@
 | `scripts/experience-write.js` | 入库的唯一通道：形状 → 红线 → 自检 → 查库 → 分支 → 写入 |
 | `scripts/assert-replay.js` | 重跑断言 + 符号存在性校验，上面两条都靠它 |
 | `scripts/mem0.js` | REST 客户端，写入与检索共用一份契约 |
+| `scripts/auth-headers.js` | `headersHelper`：把 key 注入 MCP 连接而**不让它进任何文件** |
 | `scripts/selfcheck.js` | **装好之后先跑它**，见下 |
 
 **三条 hook 的失败方向不同，改动前先看清楚：**
