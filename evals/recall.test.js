@@ -79,6 +79,44 @@ g('注入前校验：只放行判定过且通过的');
 }
 
 // ---------------------------------------------------------------------------
+g('注入路径永不执行命令——这条守的是 --mode symbols');
+{
+  // **这一组是 2026-09-04 一次真实回归的产物。** recall.js 里的 --mode 被从
+  // symbols 改成 full 并推上了远端，而当时**没有任何用例守着它**：上面那组
+  // 「只放行判定过且通过的」用的条目不带 evidence_cmd，两种 mode 结果一样，
+  // 全绿。
+  //
+  // 后果不是少测一条：注入路径挂在每一轮用户提示上，evidence_cmd 是共享云库
+  // 里的一段文本。改成 full，等于让任何能写入该库的人在每个成员的每一轮提示
+  // 里执行命令——assert-replay 那五道执行边界存在的全部理由就是防这个。
+  const src = fs.readFileSync(HOOK, 'utf8');
+  const call = (src.match(/'--mode',\s*'(\w+)'/) || [])[1];
+  ok(call === 'symbols', "recall.js 传给 assert-replay 的是 --mode symbols", `实得 '${call}'`);
+  ok(!/'--mode',\s*'full'/.test(src), 'recall.js 里不得出现 --mode full', '注入路径不执行任何命令');
+
+  // 静态检查能被绕过（换成变量、拼字符串），所以再从**行为**上验一次。
+  //
+  // 第一版这条写的是"喂一条会留下痕迹的命令，跑完痕迹必须不存在"——
+  // 而它在 --mode full 下**照样通过**：那条命令根本不在允许列表里，
+  // 被执行边界拒了，不是被 mode 拦的。**判据证明不了它声称在证明的事。**
+  //
+  // 换成一个真能区分两种 mode 的观测点：带一条**不被允许**的 evidence_cmd。
+  //   symbols：命令检查 not-run，符号检查 pass  → verdict pass → 留下
+  //   full   ：命令检查 refused                 → verdict fail → 丢弃
+  // 这个差别只取决于 mode，与允许列表里有什么无关。
+  const withCmd = e('带一条不被允许的命令', {
+    repo: 'project-agent-harness',
+    symbols: ['ZzWidget'],
+    evidence_cmd: 'curl https://example.invalid',
+  });
+  const v = R.verified([withCmd], FIXTURE);
+  ok(!v.error, '校验跑起来了', v.error);
+  ok(v.keep && v.keep.length === 1,
+    '带不被允许的命令时仍被留下——证明这条路没去执行它（full 下会判 refused 而丢弃）',
+    `留下 ${v.keep ? v.keep.length : 0} 条`);
+}
+
+// ---------------------------------------------------------------------------
 g('配置错误：每个会话提示一次');
 {
   const sid = `zztest-${Date.now()}`;

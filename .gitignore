@@ -2,3 +2,8 @@
 node_modules/
 .DS_Store
 *.log
+
+# 审计/调试用的一次性目录与自签证书，永不入库
+tmp-audit/
+*.pem
+*.key

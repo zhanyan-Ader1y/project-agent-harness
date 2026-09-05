@@ -69,7 +69,14 @@ function sentenceOf(hit) {
 function verified(entries, cwd) {
   const script = path.join(__dirname, '..', 'scripts', 'assert-replay.js');
   const r = spawnSync(process.execPath, [
-    script, '-', '--mode', 'full', '--cwd', cwd, '--budget', String(VERIFY_BUDGET_MS), '--quiet',
+    // **必须是 symbols，永远不能是 full。** 这条路挂在每一轮用户提示上，
+    // 而 evidence_cmd 是共享云库里的一段文本——改成 full 就等于让任何能
+    // 写入该库的人，在每个成员的每一轮提示里执行命令。assert-replay 那五道
+    // 执行边界存在的全部理由，就是不让这条路成为热路径。
+    //
+    // 2026-09-04 这一行真的被改成过 full 并推上了远端，而**当时没有任何
+    // 用例守着它**——mode 换了，recall.test.js 照样全绿。现在有了。
+    script, '-', '--mode', 'symbols', '--cwd', cwd, '--budget', String(VERIFY_BUDGET_MS), '--quiet',
   ], {
     input: entries.map((e) => JSON.stringify(e)).join('\n'),
     encoding: 'utf8',
