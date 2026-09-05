@@ -9,23 +9,25 @@
 | 路径 | 做什么 |
 | --- | --- |
 | `.mcp.json` | 云端 mem0（`https://mcp.mem0.ai/mcp`，HTTP，OAuth），供 agent 做临时检索 |
-| `hooks/hooks.json` | 两条，**失败方向相反**，见下 |
+| `hooks/hooks.json` | 三条，**失败方向不同**，见下 |
 | `hooks/recall.js` | 每轮提示按内容检索经验，**注入前逐条校验**，带双上限 |
 | `hooks/deny.js` | 拒绝裸调用 mem0 的写入与删除工具 |
+| `hooks/fact-priority.js` | 读到架构描述 / spec / ADR 时，注入该类文档的优先级约束 |
 | `skills/experience-intake/` | 判"值不值得记"——三镜头、九类垃圾、乙分支的信号与锚 |
 | `scripts/experience-write.js` | 入库的唯一通道：形状 → 红线 → 自检 → 查库 → 分支 → 写入 |
 | `scripts/assert-replay.js` | 重跑断言 + 符号存在性校验，上面两条都靠它 |
 | `scripts/mem0.js` | REST 客户端，写入与检索共用一份契约 |
 | `scripts/selfcheck.js` | **装好之后先跑它**，见下 |
 
-**两条 hook 的失败方向是相反的，改动前先看清楚：**
+**三条 hook 的失败方向不同，改动前先看清楚：**
 
 | hook | 解释器缺失时 | 为什么 |
 | --- | --- | --- |
 | `deny`（`PreToolUse`） | **失败关闭**（`\|\| exit 2`） | 放行就等于绕过写入脚本的全部把关 |
 | `recall`（`UserPromptSubmit`） | **失败开放** | 这里非 0 退出码会挡住用户这一轮提问；**取不到经验绝不能是"不许提问"** |
+| `fact-priority`（`PostToolUse` / `Read`） | **失败开放** | 非 0 会把错误抛回给模型；**读一个文件不能因为一条附加 hook 而出问题** |
 
-**把 `recall` 照抄成 `\|\| exit 2` 就是把它改坏。** 有用例守着这一条。
+**把后两条照抄成 `\|\| exit 2` 就是把它们改坏。** 有用例守着。
 
 ## 配置：两个值由你的项目自己定
 

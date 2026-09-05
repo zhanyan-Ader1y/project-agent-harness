@@ -121,7 +121,22 @@ SKILL 清单条目：
 
 # 架构记录、模块级知识与 `architecture-notes`
 
-**当前状态：0 行代码。仓库里也还没有 `docs/architecture/` 目录。**
+> **「读时的优先级约束」已于 2026-09-04 拿回，且执行者换了。**
+>
+> 下面那条 `.claude/rules/architecture-description.md` **不成立**——查官方文档
+> 确认：**插件不能提供 rules**（组件类型是 skills / commands / agents /
+> workflows / hooks / `.mcp.json` / `.lsp.json` / output-styles / themes /
+> monitors，`.claude/rules/` 是项目级功能）。作为插件，那条设计装不上。
+>
+> 失效点的判断是对的、也没变——**危险时刻是读的那一刻**。换成
+> `PostToolUse` 的 `Read` hook（`hooks/fact-priority.js`），并顺带覆盖了
+> spec 与 ADR 两类，直接对上目标四原话里的"spec、adr 等仅供参考"。
+> 条文已搬回 `DESIGN.md`「这三条的执行者」。
+>
+> **教训与 `auth-headers.sh` 同形**：规矩指向一个装不上的东西，等于没有规矩。
+> 本文件里其余延后项拿回时，**第一步都该是先确认那个执行者真的存在**。
+
+**当前状态：`architecture-notes` skill 与模块级知识的分流规则仍是 0 行代码。**
 
 ## 移出的原文
 
@@ -200,7 +215,9 @@ paths:
 1. **被服务的项目里真的出现了 `docs/architecture/**` 下的描述类文件**——规则有了作用对象
 2. **发生过一次「文档或记忆说 X，实跑是 Y」的误诊**（`DESIGN.md`「事实的优先级」一节说这是所有严重误诊的同一形状）——有了具体的坏事可指
 
-**先拿路径作用域规则，后拿 `architecture-notes` skill。** 前者约十几行 YAML + 一段正文，执行者与失效点对齐；后者是一份 `< 100 行` 的 skill，只在**写**架构描述时触发，收益小得多。两者不必同批。
+~~**先拿路径作用域规则，后拿 `architecture-notes` skill。**~~ **前半已于 2026-09-04 拿回**（并改为 hook，见本节开头）。这个排序判断本身被证明是对的：读时的约束确实是这一节里唯一值钱的部分，而"约十几行 YAML"的成本估计错了——**真实成本是先发现原方案装不上**。
+
+**剩下的只有 `architecture-notes` skill**：一份 `< 100 行` 的 skill，只在**写**架构描述时触发。它的拿回条件不变（上面两条），收益比已拿回的那半小得多。
 
 ---
 
@@ -513,7 +530,7 @@ mem0 的 `add` 支持 `expiration_date`（实测原样保留），到期后条�
 | 写入触发第四条（`UserPromptSubmit` 纠正判定） | 检索 hook 已落地 | **最低**（不增加 hook 数量） |
 | `expiration_date` | 一次检索命中经常超过 5 条 / 1,500 tokens | 低 |
 | 写入触发前三条（`PostToolUse`） | 库里条目数明显低于同期实际纠正与失败次数 | 中 |
-| `.claude/rules/` 架构描述规则 | `docs/architecture/**` 下真有文件 | 中 |
+| ~~`.claude/rules/` 架构描述规则~~ | ~~`docs/architecture/**` 下真有文件~~ | **已拿回**（2026-09-04），但**执行者换成了 `PostToolUse` hook**——插件不能提供 rules |
 | Merge 的 `update` / `skip` / 唯一目标判定 | 出现第一次「新候选与已有条目指向同一目标」 | 中 |
 | Dedup 层 | 一次 intake 常规产出 ≥ 2 条候选 | 中 |
 | 库审计 + 淘汰判据一 | 出现第一条实际失效的条目 | 中 |

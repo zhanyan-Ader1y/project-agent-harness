@@ -83,6 +83,24 @@ superpowers 自己已经串好了脊：`brainstorming` → `writing-plans` → `
 
 实证依据：所有严重误诊都是同一形状——**文档或记忆说 X，实跑是 Y**。把任何描述性文档排在代码之上，等于给这类错误发通行证。
 
+### 这三条的执行者：读的那一刻（`hooks/fact-priority.js`）
+
+**危险时刻不是有人写文档的时候，是有人读了文档并采信它的时候。** 因此这条规则挂 `PostToolUse` 的 `Read`：文档内容刚进上下文，优先级约束紧跟着进去，不依赖 agent 记得加载什么 skill。
+
+三类分开说，因为**它们的过期方式不同**：
+
+| 命中 | 注入的约束 |
+| --- | --- |
+| 路径含 `architecture` / `架构` | 描述系统现在长什么样，正确性来源是代码；**冲突时以代码为准，并就地更正描述** |
+| 路径含 `spec` 段，或 `-design.md` 结尾 | 当初的意图与方案，**仅供参考，不是当前事实** |
+| 路径含 `adr` / `decisions` 段 | 记录当初为什么这么决定，append-only；**即便决策被推翻，记录本身仍准确——但它不描述现状** |
+
+**只认 Markdown，且路径段要整段匹配。** 这条限制是承重的：否则 `foo.spec.ts`、`lib/architecture/graph.rs` 会被命中，而**那是把代码降级成参考材料，正好把目标四反过来执行**。去掉它，`evals/fact-priority.test.js` 里三条立刻失败。
+
+**原设计的执行者不成立，如实记下**：`docs/deferred.md` 选的是 `.claude/rules/` 路径作用域规则，理由同样是"读到匹配文件时才载入"。**但插件不能提供 rules**（2026-09-04 查官方文档确认：插件组件类型里没有它，`.claude/rules/` 是项目级功能）。失效点没变，执行者换成插件带得走的那个。
+
+**能力边界**：这是**注入，不是拦截**——agent 仍然可以不照做。目标四唯一的**硬**强制仍然只有 `assert-replay`（真去跑那条命令、真去查那个符号）。原设计选路径作用域规则时同样是注入，这一点没变差；它值得存在的理由是**时机**：一句写在 skill 里的"以代码为准"，只在 agent 恰好加载了那份 skill 时才在场。
+
 ### 目标四的执行者：断言重跑器
 
 **这是目标四唯一的机器强制，不是一句原则。**
@@ -166,11 +184,13 @@ superpowers 自己已经串好了脊：`brainstorming` → `writing-plans` → `
 
 前身的另一条教训适用于本项目的所有形状检查：**形状约束不阻止绕过，只是让绕过留下可扫描的痕迹——你还得有那个扫描器。** 审计就是扫描器。
 
-## 架构记录与模块级知识——已整节延后
+## 架构记录与模块级知识——大部分仍延后
 
-规范类 / 描述类 / ADR 的三分、`.claude/rules/architecture-description.md` 路径作用域规则、模块级知识的分流规则、`architecture-notes` skill，**整体移入 [`docs/deferred.md`](docs/deferred.md)**。
+模块级知识的分流规则、`architecture-notes` skill（怎么**写**架构文档），**仍在 [`docs/deferred.md`](docs/deferred.md)**。
 
-理由：目标四的机器强制是上面那个断言重跑器，这一节是对同一目标的第二层加固；且它管的对象（`docs/architecture/**` 下的描述类文件）目前不存在，路径作用域规则匹配不到任何文件时与不存在等价。
+理由：它们管的是写文档的人，而目标四的失效发生在读的那一刻。
+
+**已于 2026-09-04 拿回的是「读时的优先级约束」**——原设计把它交给 `.claude/rules/` 路径作用域规则，而**插件不能提供 rules**，那条路装不上；换成 `PostToolUse` 的 hook 之后失效点没变，见上「这三条的执行者」。规范类 / 描述类 / ADR 的三分本来就在上面那张表里，未移出过。
 
 ## 经验如何沉淀
 
@@ -507,8 +527,11 @@ metadata:
 | --- | --- | --- | --- |
 | `UserPromptSubmit` | — | 按本轮提示检索 mem0，注入前先校验、带双上限 | 经验取不到 |
 | `PreToolUse` | `mcp__plugin_experience_mem0__(add_memory\|update_memory\|delete).*` | 一律 deny，写入只能走脚本 | 查库可被跳过，甲分支静默死亡；库可被清空 |
+| `PostToolUse` | `Read` | 读到描述类架构 / spec / ADR 时注入该类文档的优先级约束 | 目标四在"读的那一刻"没有执行者 |
 
-**只有这两条。** 另两条移入 [`docs/deferred.md`](docs/deferred.md)：写入触发（`PostToolUse` / `Stop` 三条信号 + `UserPromptSubmit` 上的纠正判定）、意图偏离检查（含它的两种形态与前提假设 4）。
+**三条。** 另两条移入 [`docs/deferred.md`](docs/deferred.md)：写入触发（`PostToolUse` / `Stop` 三条信号 + `UserPromptSubmit` 上的纠正判定）、意图偏离检查（含它的两种形态与前提假设 4）。
+
+**三条的失败方向不同，改动前先看清楚**：`deny` 失败关闭（`|| exit 2`）；`recall` 与 `fact-priority` 失败开放——前者非 0 会挡住用户这一轮提问，后者非 0 会把错误抛回给模型，而**读文件这件事不能因为一条附加 hook 而出问题**。
 
 **两条 hook 的失败方向必须相反，这是有意的**：`deny` 失败关闭（`|| exit 2`，`PreToolUse` 只有 exit 2 才阻断），`recall` 失败开放——`UserPromptSubmit` 上非 0 的退出码会**挡住用户这一轮提问**，而"取不到经验"绝不能升级成"不许提问"。把 `recall` 照抄成 `|| exit 2` 就是把它改坏，有用例守着。
 

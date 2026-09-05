@@ -216,7 +216,7 @@ head('配置：两个值必须由你的项目自己给');
 }
 
 // ---------------------------------------------------------------------------
-head('检索与写入：两条链路真的跑得起来');
+head("检索、写入与读时约束：三条链路真的跑得起来");
 
 {
   // 检索挂在每一轮用户提示上。它必须**永远**输出可解析的 JSON 并以 0 退出——
@@ -231,6 +231,21 @@ head('检索与写入：两条链路真的跑得起来');
   try { JSON.parse(r.stdout); okJson = true; } catch (_) { /* 下面报 */ }
   if (r.status === 0 && okJson) pass('检索 hook 在最坏输入下仍规矩退出', '输出可解析、退出码 0，不会挡住提问');
   else fail('检索 hook 在最坏输入下仍规矩退出', `code=${r.status} stdout=${String(r.stdout).slice(0, 80)}`);
+
+  // 目标四在"读的那一刻"的执行者。它也是静默失效型：node 不在 PATH 时
+  // 什么都不注入，而"没有注入"与"这份文档不需要降级"看起来完全一样。
+  const fp = path.join(PLUGIN_ROOT, 'hooks', 'fact-priority.js');
+  const fpr = spawnSync(process.execPath, [fp], {
+    input: JSON.stringify({ tool_name: 'Read', tool_input: { file_path: 'docs/architecture/x.md' } }),
+    encoding: 'utf8', timeout: 30000, windowsHide: true,
+  });
+  let fpj = null;
+  try { fpj = JSON.parse(fpr.stdout); } catch (_) { /* 下面报 */ }
+  if (fpr.status === 0 && fpj && fpj.hookSpecificOutput && /以代码为准/.test(fpj.hookSpecificOutput.additionalContext || '')) {
+    pass('读到架构描述时会注入优先级约束', '描述类 / spec / ADR 三类各有说法');
+  } else {
+    fail('读到架构描述时会注入优先级约束', `code=${fpr.status} out=${String(fpr.stdout).slice(0, 80)}`);
+  }
 
   // 写入必须硬失败。这里故意送一条自带 status 的条目——它绕过的正是
   // "必须撞上第二次才进检索"那道闸门，脚本必须拒绝且什么都不写。
