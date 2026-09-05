@@ -131,6 +131,32 @@ g('对着本仓库真实的 Intent.md 跑一遍');
 }
 
 // ---------------------------------------------------------------------------
+g('本仓库自己的 Intent.md 要经得起这套检查（吃自己的狗粮）');
+{
+  // `intent-lock` 要求「至少要有几条能机械比对」。落地当天跑第一次提醒时，
+  // 本仓库自己的第五节四条**全是散文，一条也比对不了**——写规矩的人自己
+  // 没照做。这两条断言把那件事钉住。
+  const text = fs.readFileSync(path.join(REPO, 'Intent.md'), 'utf8');
+  const items = D.bullets(D.sectionBody(text, D.SECTION_NOT_DOING));
+  const terms = D.mechanicalTerms(items);
+  ok(terms.length > 0, '「明确不做的」里有可机械比对的条目', `${terms.length} 个：${terms.map((t) => t.term).join(' | ')}`);
+
+  // **锚的选取判据：它出现在改动清单里，就意味着出问题了。**
+  // 一个每次提交都命中的锚（`src/`、`evals/`）会把提醒变成噪音，
+  // 人于是学会整段跳过——那比没有锚更糟。
+  const tracked = spawnSync('git', ['ls-files'], { cwd: REPO, encoding: 'utf8', timeout: 30000 });
+  if (tracked.error || tracked.status !== 0) {
+    ok(false, 'git ls-files 可用', tracked.error ? tracked.error.message : `退出码 ${tracked.status}`);
+  } else {
+    const all = tracked.stdout.split('\n').map((s) => s.trim()).filter(Boolean);
+    const noise = D.collisions(terms, all);
+    ok(noise.length === 0,
+      `这些锚对着仓库现有的 ${all.length} 个文件一次也不误报`,
+      noise.join('；').slice(0, 160));
+  }
+}
+
+// ---------------------------------------------------------------------------
 g('★ 永远不挡住提交');
 const run = (stdin) => {
   const r = spawnSync(process.execPath, [HOOK], { cwd: REPO, encoding: 'utf8', input: stdin, timeout: 30000 });
