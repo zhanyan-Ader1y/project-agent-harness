@@ -28,7 +28,13 @@ function matches(matcher, tool) {
 }
 
 const hooksPath = path.join(__dirname, '..', 'plugins', 'experience', 'hooks', 'hooks.json');
-const matcher = JSON.parse(fs.readFileSync(hooksPath, 'utf8')).hooks.PreToolUse[0].matcher;
+// **按内容定位，不按下标。** 2026-09-04 往 PreToolUse 里插了 intent-drift，
+// 它成了 [0]，于是这份用例开始对着另一条 hook 断言并全线报错。
+// 按下标定位的用例，在同一事件下新增任何一条时都会碎。
+const denyEntry = JSON.parse(fs.readFileSync(hooksPath, 'utf8')).hooks.PreToolUse
+  .find((e) => /mcp__plugin_experience_mem0__/.test(e.matcher || ''));
+if (!denyEntry) { console.log('  FAIL  PreToolUse 里找不到 mem0 deny 那条'); process.exit(1); }
+const matcher = denyEntry.matcher;
 
 // 工具名已于 2026-09-03 对活端点确认：`https://mcp.mem0.ai/mcp`（server
 // 版本 1.29.1）的 tools/list 实得 11 个工具，写入与删除类正是下面这五个。
@@ -93,7 +99,7 @@ for (const [pat, why] of decoys) {
 const { spawnSync } = require('child_process');
 
 const PLUGIN_ROOT = path.join(__dirname, '..', 'plugins', 'experience');
-const rawCommand = JSON.parse(fs.readFileSync(hooksPath, 'utf8')).hooks.PreToolUse[0].hooks[0].command;
+const rawCommand = denyEntry.hooks[0].command;
 const command = rawCommand.replace(/\$\{CLAUDE_PLUGIN_ROOT\}/g, PLUGIN_ROOT);
 
 console.log(`\ncommand = ${rawCommand}`);

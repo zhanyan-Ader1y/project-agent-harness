@@ -25,6 +25,17 @@
     ],
     "PreToolUse": [
       {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "if": "Bash(git commit *)",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/intent-drift.js\"",
+            "timeout": 15
+          }
+        ]
+      },
+      {
         "matcher": "mcp__plugin_experience_mem0__(add_memory|update_memory|delete).*",
         "hooks": [
           {

@@ -111,10 +111,14 @@ const run = (stdin) => {
 {
   const a = run(JSON.stringify({ tool_name: 'Read', tool_input: { file_path: 'docs/architecture/x.md' } }));
   ok(a.code === 0, '命中时退出码 0', `code=${a.code}`);
-  ok(a.json && a.json.hookSpecificOutput
-    && a.json.hookSpecificOutput.hookEventName === 'PostToolUse'
-    && /以代码为准/.test(a.json.hookSpecificOutput.additionalContext),
-  '命中时以 additionalContext 注入', JSON.stringify(a.json).slice(0, 70));
+  // **必须是 systemMessage，不能是 additionalContext。**
+  // 首版用的是后者，而它在 PostToolUse 上不是受支持字段——这条 hook 会
+  // 一声不响地什么都不做，且用例照样全绿（只断言脚本自己的输出形状，
+  // 断言不到 harness 认不认那个字段）。这一组现在把字段名钉死。
+  ok(a.json && /以代码为准/.test(a.json.systemMessage || ''),
+    '命中时用 systemMessage 输出（PostToolUse 上它才是受支持字段）', JSON.stringify(a.json).slice(0, 70));
+  ok(a.json && a.json.hookSpecificOutput === undefined,
+    '不得再出现 hookSpecificOutput——additionalContext 在 PostToolUse 上无效', JSON.stringify(a.json).slice(0, 70));
 
   const b = run(JSON.stringify({ tool_input: { file_path: 'src/main.ts' } }));
   ok(b.code === 0 && JSON.stringify(b.json) === '{}', '不命中时输出 {}，退出码 0');
@@ -133,6 +137,8 @@ g('能力边界，如实写在代码里');
     '文件里明写它是注入不是拦截——目标四唯一的硬强制仍然只有 assert-replay');
   ok(/插件不能提供 rules/.test(src),
     '并记下原设计（.claude\\/rules 路径作用域规则）为什么不成立');
+  ok(/additionalContext.*不是受支持字段|不是受支持字段/.test(src),
+    '并记下 additionalContext 在 PostToolUse 上无效这次教训——删掉注释就没人知道为什么不能改回去');
 }
 
 console.log(`\n${failures === 0 ? 'PASS' : `FAIL — ${failures} 项`}`);

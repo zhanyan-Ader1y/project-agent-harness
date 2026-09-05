@@ -166,7 +166,7 @@ g('两条 hook 的失败方向必须相反，这是有意的');
   // recall 挂 UserPromptSubmit：那里非 0 退出码会挡住用户这一轮提问，
   // 取不到经验绝不能是"不许提问"。**照抄 deny 的写法就是把它改坏。**
   const h = JSON.parse(fs.readFileSync(HOOKS_JSON, 'utf8')).hooks;
-  const deny = h.PreToolUse[0].hooks[0].command;
+  const deny = h.PreToolUse.find((e) => /mcp__plugin_experience_mem0__/.test(e.matcher || '')).hooks[0].command;
   const recall = h.UserPromptSubmit[0].hooks[0].command;
   ok(/exit 2/.test(deny), 'deny 保留 `|| exit 2`——闸门必须失败关闭', deny);
   ok(!/exit\s+\d/.test(recall), 'recall 不得有 `|| exit N`——检索必须失败开放', recall);

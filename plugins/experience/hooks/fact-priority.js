@@ -83,12 +83,22 @@ function main() {
   const hit = classify(input.tool_input && input.tool_input.file_path);
   if (!hit) return emit({});
 
-  return emit({
-    hookSpecificOutput: {
-      hookEventName: 'PostToolUse',
-      additionalContext: hit.note,
-    },
-  });
+  // **用 systemMessage，不是 additionalContext。**
+  //
+  // 2026-09-04 首版写的是 `hookSpecificOutput.additionalContext`，而查文档
+  // 确认：**`additionalContext` 在 `PostToolUse` 上不是受支持字段**（它支持
+  // 的是 `PreToolUse` / `UserPromptSubmit` / `PostToolBatch` / 两个
+  // `ModelSwitch`）。`PostToolUse` 支持的是 `systemMessage` 与
+  // `terminalSequence`。
+  //
+  // 后果不是"少一句提示"——**这条 hook 会一声不响地什么都不做**，而它看起来
+  // 装好了、用例也全绿（用例只断言了脚本自己的输出形状，断言不到 harness
+  // 认不认那个字段）。**又一次"声称有执行者，执行者不在那一层"。**
+  //
+  // `systemMessage` 在这里恰好是更合适的通道：官方原话是
+  // 「On `PostToolUse` and `PostToolUseFailure`, it's shown to Claude after
+  // the tool output」——文档内容刚进上下文，约束紧跟其后，正是要的时机。
+  return emit({ systemMessage: hit.note });
 }
 
 if (require.main === module) {

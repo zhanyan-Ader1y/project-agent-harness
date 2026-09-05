@@ -66,7 +66,9 @@ head('闸门：拦截对 mem0 写入与删除工具的直接调用');
   }
 
   if (cfg) {
-    const entry = cfg.hooks && cfg.hooks.PreToolUse && cfg.hooks.PreToolUse[0];
+    // 按内容定位——同一事件下新增 hook 时，按下标会取到另一条。
+    const entry = cfg.hooks && cfg.hooks.PreToolUse
+      && cfg.hooks.PreToolUse.find((e) => /mcp__plugin_experience_mem0__/.test(e.matcher || ''));
     const matcher = entry && entry.matcher;
 
     // matcher 有两个静默失效点：插件的 MCP 工具名带 plugin 前缀；
@@ -241,7 +243,7 @@ head("检索、写入与读时约束：三条链路真的跑得起来");
   });
   let fpj = null;
   try { fpj = JSON.parse(fpr.stdout); } catch (_) { /* 下面报 */ }
-  if (fpr.status === 0 && fpj && fpj.hookSpecificOutput && /以代码为准/.test(fpj.hookSpecificOutput.additionalContext || '')) {
+  if (fpr.status === 0 && fpj && /以代码为准/.test(fpj.systemMessage || '')) {
     pass('读到架构描述时会注入优先级约束', '描述类 / spec / ADR 三类各有说法');
   } else {
     fail('读到架构描述时会注入优先级约束', `code=${fpr.status} out=${String(fpr.stdout).slice(0, 80)}`);

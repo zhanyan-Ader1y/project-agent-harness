@@ -62,14 +62,14 @@ superpowers 自己已经串好了脊：`brainstorming` → `writing-plans` → `
 
 | 目标 | 挂在哪 | 本项目新增 | 分档 |
 | --- | --- | --- | --- |
-| 意图确立 | `brainstorming` 已有审批闸门 | `intent-lock` + 偏离检查（**捆绑交付**） | **整条延后**，见 `docs/deferred.md` |
+| 意图确立 | `brainstorming` 已有审批闸门 | `intent-lock` + 提交时的偏离提醒（**捆绑交付**） | ✅ 已落地（2026-09-04），**是提醒不是拦截** |
 | review 增强 | — | `review-presentation` | **整条延后**，见 `docs/deferred.md` |
 | 事实准确 | superpowers `verification-before-completion` | **断言重跑器**（`scripts/assert-replay`） | 四个消费方留两个，见下 |
 | 经验沉淀 | — | `experience-intake` + 写入脚本 + 检索 hook | 最小可用的主体 |
 
 工件数向**三**看齐（intent → spec → plan），不向十六看齐。
 
-**四条目标的落地程度并不均衡，如实记下**：目标三（经验沉淀）占本文档一半篇幅且机制齐备；目标四有专属执行者；目标二只需迁移一份现成 skill。**目标一目前一个执行者都没有**——`intent-lock` 与偏离检查捆绑交付，而两者尚未排期。按第一原则的标准，这是四条里最空的一条。
+**四条目标的落地程度并不均衡，如实记下**：目标三（经验沉淀）占本文档一半篇幅且机制齐备；目标四有专属执行者；目标一已于 2026-09-04 落地（`intent-lock` + 提交时的偏离提醒，捆绑交付）。**现在最空的是目标二**——`review-presentation` 整条仍在 `docs/deferred.md`，它也是延后表里成本最低的一项。
 
 ## 事实的优先级
 
@@ -513,7 +513,7 @@ metadata:
 | --- | --- | --- |
 | `experience-intake` | 经验准入的唯一裁决者。`SKILL.md` 保持短，判据分置 `review.md` / `dedup.md` / `merge.md`，由写入脚本各起一次独立判定、只喂对应那份 | 新写 |
 
-**最小可用里只有这一个。** 原设计的四个 skill 中，`review-presentation`、`architecture-notes`、`intent-lock` **整体移入 [`docs/deferred.md`](docs/deferred.md)**（`adr-write` 与"架构 skill 不拆成两个"的两条明确不设，随架构一节一并移入）。
+**最小可用里有两个**（`experience-intake` 与 `intent-lock`，后者于 2026-09-04 随目标一拿回）。原设计的四个 skill 中，`review-presentation`、`architecture-notes` **整体移入 [`docs/deferred.md`](docs/deferred.md)**（`adr-write` 与"架构 skill 不拆成两个"的两条明确不设，随架构一节一并移入）。
 
 **最小可用交付的判据文件是 `review.md` 与 `merge.md` 的 `create` 部分；`dedup.md` 与 `merge.md` 的另三个动作延后**，理由见上「写入路径」一节的分档说明。
 
@@ -528,18 +528,26 @@ metadata:
 | `UserPromptSubmit` | — | 按本轮提示检索 mem0，注入前先校验、带双上限 | 经验取不到 |
 | `PreToolUse` | `mcp__plugin_experience_mem0__(add_memory\|update_memory\|delete).*` | 一律 deny，写入只能走脚本 | 查库可被跳过，甲分支静默死亡；库可被清空 |
 | `PostToolUse` | `Read` | 读到描述类架构 / spec / ADR 时注入该类文档的优先级约束 | 目标四在"读的那一刻"没有执行者 |
+| `PreToolUse` | `Bash` + `if: "Bash(git commit *)"` | 提交前把 `Intent.md` 的判据与本次改动摆到面前 | 目标一没有执行者——"忘了对照"无人观测 |
 
-**三条。** 另两条移入 [`docs/deferred.md`](docs/deferred.md)：写入触发（`PostToolUse` / `Stop` 三条信号 + `UserPromptSubmit` 上的纠正判定）、意图偏离检查（含它的两种形态与前提假设 4）。
+**目标一为什么挂提交、为什么是提醒**：编辑是过程，提交是结论——中间态本来就可能暂时不像原意图，在每次 `Edit` 上问"偏离了吗"既昂贵又没意义；提交是作者认为"这一步完成了"的时刻，也是最后一个改起来还便宜的时刻（`--amend`）。**用户于 2026-09-04 裁定为提醒而非拦截**：它解决的是"忘了对照"，不是"不许偏离"。因此脚本**不做语义判断**，只把判据、本次文件清单、以及「明确不做的」里可机械比对条目的实际比对结果摆出来——**一个会自己下"偏离/未偏离"结论的脚本，判错时比没有更糟：它让人以为对照过了。**
 
-**三条的失败方向不同，这是有意的，改动前先看清楚：**
+`if` 是按**参数**过滤的字段（权限规则语法），因此其余 Bash 调用一概不触发；没有它就得在每条 Bash 上起一个进程。
+
+**四条。** 另一条移入 [`docs/deferred.md`](docs/deferred.md)：写入触发（`PostToolUse` / `Stop` 三条信号 + `UserPromptSubmit` 上的纠正判定）。
+
+**四条的失败方向不同，这是有意的，改动前先看清楚：**
 
 | hook | 解释器缺失时 | 为什么 |
 | --- | --- | --- |
 | `deny` | **失败关闭**（`\|\| exit 2`） | `PreToolUse` 只有 exit 2 才阻断；放行等于绕过写入脚本的全部把关 |
 | `recall` | **失败开放** | `UserPromptSubmit` 上非 0 会**挡住用户这一轮提问**——"取不到经验"绝不能升级成"不许提问" |
 | `fact-priority` | **失败开放** | `PostToolUse` 上非 0 会把错误抛回给模型；**读一个文件不能因为一条附加 hook 而出问题** |
+| `intent-drift` | **失败开放** | 它是提醒不是拦截，**提交绝不能因为它而失败** |
 
-**把后两条照抄成 `|| exit 2` 就是把它们改坏**，有用例守着。
+**把后三条照抄成 `|| exit 2` 就是把它们改坏**，有用例守着。
+
+**hook 配置里不要按下标定位。** 2026-09-04 往 `PreToolUse` 里插入 `intent-drift` 之后，三处按 `PreToolUse[0]` 取 deny 那条的代码（两份 eval + `selfcheck`）同时开始对着错误的条目断言。**已全部改为按 matcher 内容查找**——同一事件下新增任何一条 hook 都不该让既有用例碎掉。
 
 **"deny 已生效而替代路径不存在"这项当前状态已于 2026-09-04 解除**——`scripts/experience-write.js` 已落地。在它落地之前，装上这个插件对用户是净负能力的（拦掉了 mem0 裸写入，替代路径不存在），那正是把它排为最小可用唯一解锁点的理由。
 
@@ -597,20 +605,22 @@ project-agent-harness/
 │   ├── .claude-plugin/plugin.json      # 只有这个文件放这里
 │   ├── .mcp.json                       # 云端 mem0（仅检索）
 │   ├── hooks/
-│   │   ├── hooks.json                  # 三条，失败方向见「hook 清单」
+│   │   ├── hooks.json                  # 四条，失败方向见「hook 清单」
 │   │   ├── recall.js                   # UserPromptSubmit：检索 → 校验 → 注入
 │   │   ├── fact-priority.js            # PostToolUse/Read：读到架构/spec/ADR 时降级
+│   │   ├── intent-drift.js             # PreToolUse/git commit：提交前对照意图锚
 │   │   └── deny.js                     # PreToolUse：拒绝裸调用写入工具
 │   ├── scripts/                        # experience-write / assert-replay / mem0
 │   │                                   # / auth-headers / selfcheck
 │   ├── skills/
 │   │   └── experience-intake/
 │   │       ├── SKILL.md                # 短；抽取判据 + 指向下面三份
+│   │   └── intent-lock/SKILL.md        # 意图锚怎么写才能被比对
 │   │       ├── review.md               # 三镜头 + 九类垃圾，默认保留
 │   │       ├── dedup.md                # 否决式规则，宁严勿宽（延后，未建）
 │   │       └── merge.md                # 甲/乙分支；四动作留待拿回
 │   └── README.md                       # 模块核心设计随包走
-├── evals/                              # 7 份 487 项；run-all.js 自动发现 *.test.js
+├── evals/                              # 8 份 545 项；run-all.js 自动发现 *.test.js
 ├── .github/workflows/evals.yml         # 门禁：双 OS matrix，首次运行 2026-09-04
 ├── DESIGN.md
 └── docs/
@@ -658,19 +668,19 @@ project-agent-harness/
 
 | | 估 | 实际 | 差在哪 |
 | --- | --- | --- | --- |
-| skill | 1 | **1** | — |
-| hook | 2 | **3** | `fact-priority` 是目标四拿回的那半，分档时它还在 `deferred.md` 里 |
+| skill | 1 | **2** | `intent-lock` 是目标一拿回带来的 |
+| hook | 2 | **4** | `fact-priority`（目标四）与 `intent-drift`（目标一），分档时两者都还在 `deferred.md` 里 |
 | 脚本 | 4 | **5** | `auth-headers.js` 分档时不存在——它是"规矩指向一个装不上的东西"暴露出来的 |
 
 ```text
-assert-replay 898 + experience-write 525 + selfcheck 384 + mem0 116 + auth-headers 59
-              + recall 185 + fact-priority 102 + deny 32  =  2,301 行
-eval 7 份 487 项：297 + 72 + 41 + 30 + 23 + 17 + 7
+assert-replay 898 + experience-write 525 + selfcheck 386 + mem0 116 + auth-headers 59
+              + recall 185 + fact-priority 112 + intent-drift 219 + deny 32  =  2,532 行
+eval 8 份 545 项：297 + 72 + 56 + 43 + 30 + 23 + 17 + 7
 ```
 
 **"2 脚本"变成 5 个**，三个增量各有不可省的理由：`mem0.js` 是写入与检索共用的 REST 契约（各写一份会出现"写得进去但检索不到"且两端不报错）；`selfcheck.js` 是消费方验证插件在他那儿真的生效的手段；`auth-headers.js` 是"不得内联凭据"这条规矩唯一走得通的替代路径。
 
-**这笔账比分档时估的大了约一倍，而且是一路加上来的**——每一项加进来时都能回答"删掉它会发生什么坏事"，但没有一处停下来重算总和。约束 1 说的是"不能再变庞大"，量的正是这个总和。**下一次新增之前，先看这张表。**
+**这笔账比分档时估的大了一倍多，而且是一路加上来的**——每一项加进来时都能回答"删掉它会发生什么坏事"，但没有一处停下来重算总和。约束 1 说的是"不能再变庞大"，量的正是这个总和。**下一次新增之前，先看这张表。**
 
 **常驻上下文没有跟着涨**：仍然只有 skill 的 description 加 hook 配置。**维护面涨了，两者不是一回事。**
 
